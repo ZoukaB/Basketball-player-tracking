@@ -1,0 +1,13 @@
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch
+torchvision
+ipykernel
+gdown
+inference
+supervision==0.27.0
+git+https://github.com/roboflow/sports.git@feat/basketball
+transformers
+num2words
+opencv-python
+numpy
+tqdm
