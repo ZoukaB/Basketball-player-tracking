@@ -2,6 +2,7 @@
 torch
 torchvision
 ipykernel
+ipywidgets
 gdown
 inference
 supervision==0.27.0
