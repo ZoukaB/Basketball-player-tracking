@@ -11,4 +11,6 @@ transformers
 num2words
 opencv-python
 numpy
+pandas
+python-dotenv
 tqdm

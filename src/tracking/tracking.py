@@ -101,6 +101,36 @@ def match_detector_to_tracker_id(
     return None
 
 
+def get_state_matches(
+    player_detections: sv.Detections,
+    state_detections: sv.Detections,
+    iou_threshold: float = MATCH_IOU_THRESHOLD,
+) -> dict[int, set[int]]:
+    """Match RF-DETR player-state boxes to SAM2 tracks by bounding-box IoU.
+
+    Returns ``{tracker_id: {class_id, ...}}`` for every overlapping state box.
+    """
+    matches: dict[int, set[int]] = {}
+    if (
+        len(player_detections) == 0
+        or len(state_detections) == 0
+        or player_detections.tracker_id is None
+    ):
+        return matches
+
+    iou_matrix = sv.box_iou_batch(
+        player_detections.xyxy,
+        state_detections.xyxy,
+    )
+    for player_idx, tracker_id in enumerate(player_detections.tracker_id):
+        tracker_id = int(tracker_id)
+        state_indices = np.where(iou_matrix[player_idx] >= iou_threshold)[0]
+        matches[tracker_id] = {
+            int(state_detections.class_id[i]) for i in state_indices
+        }
+    return matches
+
+
 class SAM2Tracker:
     """Prompt SAM2 on the first frame, then track player masks over time."""
 
