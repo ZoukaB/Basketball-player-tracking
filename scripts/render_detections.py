@@ -13,6 +13,8 @@ Usage (from the repo root):
 from __future__ import annotations
 
 import argparse
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -49,6 +51,67 @@ COLOR = sv.ColorPalette.from_hex(
     ]
 )
 FALLBACK_COURT_COLOR = "#888888"
+
+
+def compress_h264(source: Path, target: Path) -> None:
+    """Re-encode OpenCV ``mp4v`` output the same way the notebook does.
+
+    ``sv.VideoSink`` writes MPEG-4 Part 2 (``mp4v``), which most players and
+    browsers cannot play. ffmpeg ``libx264`` + ``yuv420p`` is the readable file.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg not found. Install it to write playable mp4s.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-loglevel",
+            "error",
+            "-i",
+            str(source),
+            "-vcodec",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            "28",
+            "-movflags",
+            "+faststart",
+            str(target),
+        ],
+        check=True,
+    )
+
+
+def write_frames_to_mp4(
+    frames,
+    output_path: Path,
+    fps: float,
+    width: int,
+    height: int,
+    total_frames: int,
+    desc: str,
+) -> None:
+    """Write frames with VideoSink, then ffmpeg-compress like the notebook."""
+    width -= width % 2
+    height -= height % 2
+    raw_path = output_path.with_name(output_path.stem + "-raw.mp4")
+    video_info = sv.VideoInfo(
+        width=width,
+        height=height,
+        fps=int(round(fps)),
+        total_frames=total_frames,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with sv.VideoSink(str(raw_path), video_info) as sink:
+        for frame in tqdm(frames, total=total_frames, desc=desc):
+            if frame.shape[1] != width or frame.shape[0] != height:
+                frame = cv2.resize(frame, (width, height))
+            sink.write_frame(frame)
+    compress_h264(raw_path, output_path)
+    raw_path.unlink(missing_ok=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -109,12 +172,6 @@ def render_detections_video(
     if first_frame is None:
         raise FileNotFoundError(f"Could not read {frame_paths[0]}")
     height, width = first_frame.shape[:2]
-    video_info = sv.VideoInfo(
-        width=width,
-        height=height,
-        fps=fps,
-        total_frames=len(frame_paths),
-    )
 
     mask_annotator = sv.MaskAnnotator(
         color=COLOR,
@@ -131,13 +188,8 @@ def render_detections_video(
         text_color=sv.Color.BLACK,
     )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with sv.VideoSink(str(output_path), video_info) as sink:
-        for _idx, frame, detections in tqdm(
-            iter_history(history_dir),
-            total=len(frame_paths),
-            desc="render camera",
-        ):
+    def annotated_frames():
+        for _idx, frame, detections in iter_history(history_dir):
             annotated = frame.copy()
             if len(detections) > 0:
                 if detections.mask is not None:
@@ -159,7 +211,17 @@ def render_detections_video(
                     detections=detections,
                     labels=labels,
                 )
-            sink.write_frame(annotated)
+            yield annotated
+
+    write_frames_to_mp4(
+        annotated_frames(),
+        output_path,
+        fps=fps,
+        width=width,
+        height=height,
+        total_frames=len(frame_paths),
+        desc="render camera",
+    )
     return len(frame_paths)
 
 
@@ -222,15 +284,8 @@ def render_court_video(
     n_frames = int(player_df["frame_idx"].max()) + 1
     grouped = player_df.groupby("frame_idx")
 
-    video_info = sv.VideoInfo(
-        width=court_w,
-        height=court_h,
-        fps=fps,
-        total_frames=n_frames,
-    )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with sv.VideoSink(str(output_path), video_info) as sink:
-        for frame_idx in tqdm(range(n_frames), desc="render court"):
+    def court_frames():
+        for frame_idx in range(n_frames):
             court = draw_court(config=config)
             if frame_idx in grouped.groups:
                 court = draw_frame_on_court(
@@ -238,7 +293,17 @@ def render_court_video(
                     config,
                     court,
                 )
-            sink.write_frame(court)
+            yield court
+
+    write_frames_to_mp4(
+        court_frames(),
+        output_path,
+        fps=fps,
+        width=court_w,
+        height=court_h,
+        total_frames=n_frames,
+        desc="render court",
+    )
     return n_frames
 
 
