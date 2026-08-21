@@ -80,18 +80,20 @@ class BasketballPipeline:
         team_rosters: dict[str, dict[str, str]] | None = None,
         ocr_stride: int = OCR_STRIDE,
         team_crop_stride: int = TEAM_CROP_STRIDE,
+        use_ocr: bool = False,
     ) -> None:
         # Cluster id -> official team name. Flip this if names look swapped.
         self.team_names = team_names if team_names is not None else dict(DEFAULT_TEAM_NAMES)
         self.team_rosters = team_rosters if team_rosters is not None else TEAM_ROSTERS
         self.ocr_stride = ocr_stride
         self.team_crop_stride = team_crop_stride
+        self.use_ocr = use_ocr
 
         # 1) Roboflow RF-DETR: players, numbers, ball-in-basket, shot actions.
         self.detector = BasketballDetector()
 
-        # 2) SmolVLM2: read digits from jersey-number crops.
-        self.ocr = JerseyOCR()
+        # 2) SmolVLM2 jersey OCR (skipped unless --ocr).
+        self.ocr = JerseyOCR() if use_ocr else None
 
         # 3) SAM2: prompt with first-frame boxes, then track masks + IDs.
         self.tracker = SAM2Tracker()
@@ -183,25 +185,26 @@ class BasketballPipeline:
                     class_agnostic=True,
                 )
 
-            # --- Jersey OCR on unresolved tracks, every OCR_STRIDE frames ---
-            unresolved = [
-                int(tid)
-                for tid in (players.tracker_id if players.tracker_id is not None else [])
-                if int(tid) not in resolved_numbers
-            ]
-            if (
-                frame_idx % self.ocr_stride == 0
-                and unresolved
-                and len(number_dets) > 0
-                and len(players) > 0
-            ):
-                texts, pairs = self.ocr.recognize_and_match(frame, number_dets, players)
-                if pairs:
-                    player_idx, number_idx = zip(*pairs)
-                    matched_ids = np.asarray(players.tracker_id)[list(player_idx)]
-                    matched_texts = [texts[int(i)] for i in number_idx]
-                    number_validator.update(matched_ids, values=matched_texts)
-                    resolved_numbers.update(int(tid) for tid in matched_ids)
+            # --- Jersey OCR (optional): unresolved tracks, every OCR_STRIDE frames ---
+            if self.use_ocr and self.ocr is not None:
+                unresolved = [
+                    int(tid)
+                    for tid in (players.tracker_id if players.tracker_id is not None else [])
+                    if int(tid) not in resolved_numbers
+                ]
+                if (
+                    frame_idx % self.ocr_stride == 0
+                    and unresolved
+                    and len(number_dets) > 0
+                    and len(players) > 0
+                ):
+                    texts, pairs = self.ocr.recognize_and_match(frame, number_dets, players)
+                    if pairs:
+                        player_idx, number_idx = zip(*pairs)
+                        matched_ids = np.asarray(players.tracker_id)[list(player_idx)]
+                        matched_texts = [texts[int(i)] for i in number_idx]
+                        number_validator.update(matched_ids, values=matched_texts)
+                        resolved_numbers.update(int(tid) for tid in matched_ids)
 
             # --- Court mapping: feet (bottom-center) -> court coordinates ---
             court_xy = self.court.map_detections(frame, players)

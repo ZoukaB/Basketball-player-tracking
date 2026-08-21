@@ -5,6 +5,7 @@ Writes tables and history under ``outputs/<video_name>/``.
 Usage (from the repo root, with .env containing ROBOFLOW_API_KEY):
 
     python scripts/run_pipeline.py --video path/to/clip.mp4 --max-frames 30
+    python scripts/run_pipeline.py --video path/to/clip.mp4 --ocr
     python scripts/render_detections.py --run-dir outputs/clip
 """
 
@@ -43,6 +44,12 @@ def parse_args() -> argparse.Namespace:
         default=str(REPO_ROOT / "outputs"),
         help="Root output directory (a <video_name> folder is created inside)",
     )
+    parser.add_argument(
+        "--ocr",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Run jersey OCR to fill number/name in identity_df (default: off)",
+    )
     return parser.parse_args()
 
 
@@ -53,7 +60,10 @@ def main() -> None:
     history_dir = run_dir / "history"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    pipeline = BasketballPipeline(team_names=dict(DEFAULT_TEAM_NAMES))
+    pipeline = BasketballPipeline(
+        team_names=dict(DEFAULT_TEAM_NAMES),
+        use_ocr=args.ocr,
+    )
     result = pipeline.run(
         video_path,
         max_frames=args.max_frames,

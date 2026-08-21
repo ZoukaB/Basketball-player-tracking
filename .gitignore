@@ -59,6 +59,10 @@ data/
 outputs/
 !outputs/.gitkeep
 
+# Pipeline artifacts (numpy / joblib / parquet dumps)
+artifacts/*
+!artifacts/.gitkeep
+
 # Cache files
 .cache/
 *.cache
