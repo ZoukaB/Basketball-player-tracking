@@ -45,8 +45,8 @@ models/*.pkl
 models/*.safetensors
 models/checkpoints/
 
-# Data and videos
-data/
+# Data and videos (keep empty folder via .gitkeep)
+data/*
 !data/.gitkeep
 *.mp4
 *.avi
@@ -55,11 +55,11 @@ data/
 *.wmv
 *.webm
 
-# Generated outputs
-outputs/
+# Generated outputs (keep empty folder via .gitkeep)
+outputs/*
 !outputs/.gitkeep
 
-# Pipeline artifacts (numpy / joblib / parquet dumps)
+# Pipeline artifacts (keep empty folder via .gitkeep)
 artifacts/*
 !artifacts/.gitkeep
 
