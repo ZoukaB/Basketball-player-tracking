@@ -5,6 +5,7 @@ Writes tables and history under ``outputs/<video_name>/``.
 Usage (from the repo root, with .env containing ROBOFLOW_API_KEY):
 
     python scripts/run_pipeline.py --video path/to/clip.mp4 --max-frames 30
+    python scripts/run_pipeline.py --video path/to/clip.mp4 --fps 10
     python scripts/run_pipeline.py --video path/to/clip.mp4 --ocr
     python scripts/render_detections.py --run-dir outputs/clip
 """
@@ -37,7 +38,13 @@ def parse_args() -> argparse.Namespace:
         "--max-frames",
         type=int,
         default=None,
-        help="Stop after N frames. Use ~30 for a quick test.",
+        help="Stop after N processed frames. Use ~30 for a quick test.",
+    )
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=10,
+        help="Tracking sample rate. Source video is strided to this FPS (default: 10). Pass 0 for every frame.",
     )
     parser.add_argument(
         "--output-dir",
@@ -68,14 +75,17 @@ def main() -> None:
         video_path,
         max_frames=args.max_frames,
         history_dir=history_dir,
+        target_fps=None if args.fps == 0 else args.fps,
     )
 
     player_path = run_dir / "player_df.csv"
     event_path = run_dir / "event_df.csv"
     identity_path = run_dir / "identity_df.csv"
+    shots_path = run_dir / "shots_df.csv"
     result.player_df.to_csv(player_path, index=False)
     result.event_df.to_csv(event_path, index=False)
     result.identity_df.to_csv(identity_path, index=False)
+    result.shots_df.to_csv(shots_path, index=False)
 
     print("identity_df")
     print(result.identity_df.to_string(index=False))
@@ -89,9 +99,11 @@ def main() -> None:
     print(f"wrote {player_path}")
     print(f"wrote {event_path}")
     print(f"wrote {identity_path}")
+    print(f"wrote {shots_path}")
     print(f"history: {history_dir}")
     print(f"player_df rows: {len(result.player_df)}")
     print(f"event_df rows:  {len(result.event_df)}")
+    print(f"shots_df rows:  {len(result.shots_df)}")
 
 
 if __name__ == "__main__":

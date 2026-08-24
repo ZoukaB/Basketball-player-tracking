@@ -18,6 +18,11 @@ event_df
     One row per frame:
     ``frame_idx, possession, layup_dunk, jumpshot, ball_in_basket``
 
+shots_df
+    One row per shot event:
+    ``shot_id, start_frame, end_frame, outcome, shot_type, tracker_id,
+    team, name, number, court_x, court_y``
+
 history (``outputs/<video_name>/history``)
     ``frame_history/`` — JPEG per frame
     ``detections_history/`` — SAM2 ``sv.Detections`` (boxes, masks, tracker_id)
@@ -50,6 +55,7 @@ from src.pipeline.history import (
     save_history_meta,
 )
 from src.pipeline.rosters import DEFAULT_TEAM_NAMES, TEAM_ROSTERS
+from src.pipeline.shots import ShotCollector, attach_identity_and_court, empty_shots_df
 from src.tracking import SAM2Tracker, get_state_matches
 
 # --- notebook constants -------------------------------------------------------
@@ -59,6 +65,17 @@ NUMBER_VALIDATE_STREAK = 3     # ConsecutiveValueTracker for OCR
 TEAM_VALIDATE_STREAK = 1       # teams are assigned once on the first frame
 STATE_NMS_THRESHOLD = 0.5      # class-agnostic NMS on player-state boxes
 STATE_IOU_THRESHOLD = 0.3      # IoU to attach RF-DETR states onto SAM2 tracks
+DEFAULT_TARGET_FPS = 10.0      # subsample the source video to this rate
+
+
+def frame_stride(source_fps: float, target_fps: float | None) -> int:
+    """How many source frames to skip so processing runs near ``target_fps``."""
+    if target_fps is None or target_fps <= 0:
+        return 1
+    source_fps = float(source_fps)
+    if source_fps <= 0 or target_fps >= source_fps:
+        return 1
+    return max(1, int(round(source_fps / float(target_fps))))
 
 
 @dataclass
@@ -68,6 +85,7 @@ class PipelineResult:
     player_df: pd.DataFrame
     event_df: pd.DataFrame
     identity_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    shots_df: pd.DataFrame = field(default_factory=empty_shots_df)
     history_dir: Path | None = None
 
 
@@ -114,8 +132,13 @@ class BasketballPipeline:
         video_path: str | Path,
         max_frames: Optional[int] = None,
         history_dir: str | Path | None = None,
+        target_fps: float | None = DEFAULT_TARGET_FPS,
     ) -> PipelineResult:
         """Process ``video_path`` and return player / event dataframes.
+
+        ``target_fps`` subsamples the source video (default 10). Pass ``None``
+        to process every frame. ``max_frames`` counts processed frames, not
+        source frames.
 
         When ``history_dir`` is set, each frame and its SAM2 detections are
         written to ``frame_history/`` and ``detections_history/`` as the loop
@@ -126,11 +149,18 @@ class BasketballPipeline:
             raise FileNotFoundError(f"Video not found: {video_path}")
 
         video_info = sv.VideoInfo.from_video_path(str(video_path))
+        stride = frame_stride(float(video_info.fps), target_fps)
+        process_fps = float(video_info.fps) / stride
+        print(
+            f"tracking at {process_fps:.1f} fps "
+            f"(stride={stride}, source={float(video_info.fps):.1f} fps)"
+        )
         if history_dir is not None:
             history_dir = prepare_history_dir(history_dir)
 
         # Train the team classifier on jersey crops sampled from this clip.
-        self._fit_team_classifier(video_path, max_frames=max_frames)
+        source_limit = None if max_frames is None else max_frames * stride
+        self._fit_team_classifier(video_path, max_frames=source_limit)
 
         # Prompt SAM2 from the first frame that has player boxes.
         first_frame = self._first_frame(video_path)
@@ -161,9 +191,15 @@ class BasketballPipeline:
         video_xy: list[np.ndarray] = []
         event_rows: list[dict] = []
         n_players = len(tracker_ids)
+        shot_collector = ShotCollector(fps=process_fps)
 
-        frame_generator = sv.get_video_frames_generator(str(video_path))
-        for frame_idx, frame in enumerate(tqdm(frame_generator, desc="pipeline")):
+        frame_generator = sv.get_video_frames_generator(str(video_path), stride=stride)
+        total = None
+        if video_info.total_frames:
+            total = int(video_info.total_frames) // stride
+            if max_frames is not None:
+                total = min(total, max_frames)
+        for frame_idx, frame in enumerate(tqdm(frame_generator, desc="pipeline", total=total)):
             if max_frames is not None and frame_idx >= max_frames:
                 break
 
@@ -226,17 +262,27 @@ class BasketballPipeline:
                 iou_threshold=STATE_IOU_THRESHOLD,
             )
             all_classes = set().union(*state_matches.values()) if state_matches else set()
+            has_ball_in_basket = bool(
+                other_dets.class_id is not None
+                and np.any(other_dets.class_id == DetectionClass.BALL_IN_BASKET)
+            )
             event_rows.append(
                 {
                     "frame_idx": frame_idx,
                     "possession": DetectionClass.PLAYER_IN_POSSESSION in all_classes,
                     "layup_dunk": DetectionClass.PLAYER_LAYUP_DUNK in all_classes,
                     "jumpshot": DetectionClass.PLAYER_JUMP_SHOT in all_classes,
-                    "ball_in_basket": bool(
-                        other_dets.class_id is not None
-                        and np.any(other_dets.class_id == DetectionClass.BALL_IN_BASKET)
-                    ),
+                    "ball_in_basket": has_ball_in_basket,
                 }
+            )
+            shot_collector.update(
+                frame_idx=frame_idx,
+                all_dets=all_dets,
+                players=players,
+                court_xy=court_xy,
+                court=self.court,
+                frame=frame,
+                has_ball_in_basket=has_ball_in_basket,
             )
 
         event_df = pd.DataFrame(event_rows)
@@ -246,7 +292,7 @@ class BasketballPipeline:
                 history_dir,
                 source_video=str(video_path),
                 video_name=video_path.stem,
-                fps=float(video_info.fps),
+                fps=process_fps,
                 width=int(video_info.width),
                 height=int(video_info.height),
                 n_frames=len(event_rows),
@@ -266,10 +312,17 @@ class BasketballPipeline:
             tracker_ids=tracker_ids,
             identity_df=identity_df,
         )
+        last_frame = max(len(event_rows) - 1, 0)
+        shots_df = attach_identity_and_court(
+            shot_collector.finalize(last_frame=last_frame),
+            player_df=player_df,
+            identity_df=identity_df,
+        )
         return PipelineResult(
             player_df=player_df,
             event_df=event_df,
             identity_df=identity_df,
+            shots_df=shots_df,
             history_dir=history_dir,
         )
 
