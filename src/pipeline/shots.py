@@ -9,7 +9,7 @@ shooter's feet are mapped to court coordinates.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import cv2
 import numpy as np
@@ -18,8 +18,13 @@ import supervision as sv
 from sports.basketball import ShotEventTracker, draw_made_and_miss_on_court
 
 from src.court import CourtKeypointDetector, default_court_config
-from src.detection.object_detection import DetectionClass, filter_class_ids
+from src.detection.object_detection import (
+    DetectionClass,
+    JERSEY_CROP_SCALE,
+    filter_class_ids,
+)
 from src.tracking import match_detector_to_tracker_id
+from src.tracking.tracking import MATCH_IOU_THRESHOLD
 
 SHOT_COLUMNS = [
     "shot_id",
@@ -50,6 +55,97 @@ def shot_event_tracker_from_fps(fps: float) -> ShotEventTracker:
     )
 
 
+def majority_team_id(team_ids: np.ndarray | Sequence[int]) -> Optional[int]:
+    """Return the most common non-negative team id, or None if none exist."""
+    values = np.asarray(team_ids)
+    values = values[values >= 0]
+    if len(values) == 0:
+        return None
+    unique, counts = np.unique(values, return_counts=True)
+    return int(unique[np.argmax(counts)])
+
+
+def predict_detection_teams(
+    frame: np.ndarray,
+    detections: sv.Detections,
+    team_classifier,
+    crop_scale: float = JERSEY_CROP_SCALE,
+) -> np.ndarray:
+    """Predict cluster team ids (0/1) for each box. Unknown crops are ``-1``."""
+    teams = np.full(len(detections), -1, dtype=int)
+    if len(detections) == 0:
+        return teams
+    boxes = sv.scale_boxes(xyxy=detections.xyxy, factor=crop_scale)
+    crops: list[np.ndarray] = []
+    indices: list[int] = []
+    for i, box in enumerate(boxes):
+        crop = sv.crop_image(frame, box)
+        if crop is None or getattr(crop, "size", 0) == 0:
+            continue
+        crops.append(crop)
+        indices.append(i)
+    if not crops:
+        return teams
+    predicted = np.asarray(team_classifier.predict(crops), dtype=int)
+    teams[np.asarray(indices, dtype=int)] = predicted
+    return teams
+
+
+def filter_detections_by_team(
+    detections: sv.Detections,
+    team_ids: np.ndarray,
+    team_id: Optional[int],
+) -> sv.Detections:
+    """Keep boxes whose predicted team matches ``team_id``."""
+    if len(detections) == 0 or team_id is None:
+        return detections[np.zeros(len(detections), dtype=bool)]
+    mask = np.asarray(team_ids) == int(team_id)
+    return detections[mask]
+
+
+def filter_layups_to_offense(
+    layup_dets: sv.Detections,
+    players: sv.Detections,
+    player_teams: Optional[np.ndarray],
+    offensive_team_id: Optional[int],
+    iou_threshold: float = MATCH_IOU_THRESHOLD,
+) -> sv.Detections:
+    """Keep layup/dunk boxes that IoU-match a tracked player on offense."""
+    if len(layup_dets) == 0:
+        return layup_dets
+    empty = layup_dets[np.zeros(len(layup_dets), dtype=bool)]
+    if (
+        offensive_team_id is None
+        or player_teams is None
+        or len(players) == 0
+        or players.tracker_id is None
+        or len(player_teams) != len(players)
+    ):
+        return empty
+    iou_matrix = sv.box_iou_batch(layup_dets.xyxy, players.xyxy)
+    keep = np.zeros(len(layup_dets), dtype=bool)
+    for i, ious in enumerate(iou_matrix):
+        j = int(np.argmax(ious))
+        if ious[j] < iou_threshold:
+            continue
+        try:
+            team_id = int(player_teams[j])
+        except (TypeError, ValueError):
+            continue
+        if team_id == int(offensive_team_id):
+            keep[i] = True
+    return layup_dets[keep]
+
+
+def update_offensive_team_id(
+    current: Optional[int],
+    possession_team_ids: np.ndarray | Sequence[int],
+) -> Optional[int]:
+    """Stick with the last known offense; refresh when possession is visible."""
+    inferred = majority_team_id(possession_team_ids)
+    return inferred if inferred is not None else current
+
+
 class ShotCollector:
     """Consume detector flags each frame and emit completed shot rows."""
 
@@ -57,6 +153,7 @@ class ShotCollector:
         self.tracker = shot_event_tracker_from_fps(fps)
         self.pending: dict | None = None
         self.rows: list[dict] = []
+        self.offensive_team_id: int | None = None
 
     def update(
         self,
@@ -67,9 +164,32 @@ class ShotCollector:
         court: CourtKeypointDetector,
         frame: np.ndarray,
         has_ball_in_basket: bool,
+        player_teams: Optional[np.ndarray] = None,
+        possession_tracker_ids: Optional[Sequence[int]] = None,
     ) -> None:
+        if possession_tracker_ids and player_teams is not None and players.tracker_id is not None:
+            tid_to_team = {
+                int(tid): int(team)
+                for tid, team in zip(players.tracker_id, player_teams)
+                if team is not None and int(team) >= 0
+            }
+            possession_teams = [
+                tid_to_team[int(tid)]
+                for tid in possession_tracker_ids
+                if int(tid) in tid_to_team
+            ]
+            self.offensive_team_id = update_offensive_team_id(
+                self.offensive_team_id,
+                possession_teams,
+            )
+
         jump_dets = filter_class_ids(all_dets, DetectionClass.PLAYER_JUMP_SHOT)
-        layup_dets = filter_class_ids(all_dets, DetectionClass.PLAYER_LAYUP_DUNK)
+        layup_dets = filter_layups_to_offense(
+            filter_class_ids(all_dets, DetectionClass.PLAYER_LAYUP_DUNK),
+            players,
+            player_teams,
+            self.offensive_team_id,
+        )
         events = self.tracker.update(
             frame_index=frame_idx,
             has_jump_shot=len(jump_dets) > 0,

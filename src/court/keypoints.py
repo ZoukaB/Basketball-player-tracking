@@ -140,7 +140,9 @@ class CourtKeypointDetector:
         self.confidence = confidence
         self.anchor_confidence = anchor_confidence
         self.config = config or default_court_config()
-        self.model = get_model(model_id=model_id)
+        from src.utils.env import roboflow_api_key
+
+        self.model = get_model(model_id=model_id, api_key=roboflow_api_key())
 
     def detect(self, frame: np.ndarray) -> sv.KeyPoints:
         """Detect all court keypoints (unfiltered)."""

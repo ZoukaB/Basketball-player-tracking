@@ -110,7 +110,9 @@ class JerseyOCR:
         self.prompt = prompt
         self.pad_px = pad_px
         self.pad_py = pad_py
-        self.model = get_model(model_id=model_id)
+        from src.utils.env import roboflow_api_key
+
+        self.model = get_model(model_id=model_id, api_key=roboflow_api_key())
 
     def recognize(self, crop: np.ndarray) -> str:
         """Read a single jersey-number crop."""

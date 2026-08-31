@@ -118,7 +118,9 @@ class BasketballDetector:
         self.confidence = confidence
         self.iou_threshold = iou_threshold
         self.class_agnostic_nms = class_agnostic_nms
-        self.model = get_model(model_id=model_id)
+        from src.utils.env import roboflow_api_key
+
+        self.model = get_model(model_id=model_id, api_key=roboflow_api_key())
 
     def infer(self, frame: np.ndarray) -> sv.Detections:
         """Run the detector and return all classes as ``sv.Detections``."""

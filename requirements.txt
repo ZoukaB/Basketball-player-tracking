@@ -13,4 +13,5 @@ opencv-python
 numpy
 pandas
 python-dotenv
+truststore
 tqdm

@@ -266,6 +266,21 @@ class BasketballPipeline:
                 other_dets.class_id is not None
                 and np.any(other_dets.class_id == DetectionClass.BALL_IN_BASKET)
             )
+            if players.tracker_id is not None and len(players) > 0:
+                validated = team_validator.get_validated(
+                    tracker_ids=[int(tid) for tid in players.tracker_id]
+                )
+                player_teams = np.array(
+                    [-1 if v is None else int(v) for v in validated],
+                    dtype=int,
+                )
+            else:
+                player_teams = None
+            possession_tracker_ids = [
+                tid
+                for tid, classes in state_matches.items()
+                if DetectionClass.PLAYER_IN_POSSESSION in classes
+            ]
             event_rows.append(
                 {
                     "frame_idx": frame_idx,
@@ -283,6 +298,8 @@ class BasketballPipeline:
                 court=self.court,
                 frame=frame,
                 has_ball_in_basket=has_ball_in_basket,
+                player_teams=player_teams,
+                possession_tracker_ids=possession_tracker_ids,
             )
 
         event_df = pd.DataFrame(event_rows)
