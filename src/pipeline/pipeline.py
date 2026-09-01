@@ -11,7 +11,7 @@ Outputs
 -------
 player_df
     One row per tracked player per frame:
-    ``frame_idx, tracker_id, name, number, court_x, court_y``
+    ``frame_idx, tracker_id, team, name, number, court_x, court_y``
     ``court_x`` / ``court_y`` come from ``cleaned_xy``.
 
 event_df
@@ -429,6 +429,7 @@ class BasketballPipeline:
                     {
                         "frame_idx": frame_idx,
                         "tracker_id": tracker_id,
+                        "team": None if info is None else info.get("team"),
                         "name": None if info is None else info.get("name"),
                         "number": None if info is None else info.get("number"),
                         "court_x": float(court_x) if np.isfinite(court_x) else np.nan,
@@ -441,6 +442,7 @@ class BasketballPipeline:
                 columns=[
                     "frame_idx",
                     "tracker_id",
+                    "team",
                     "name",
                     "number",
                     "court_x",
