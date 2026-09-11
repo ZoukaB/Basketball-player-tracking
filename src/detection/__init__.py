@@ -1,13 +1,21 @@
 from .object_detection import (
+    CLASS_CONFIDENCE,
     CLASS_NAMES,
     DEFAULT_CONFIDENCE,
     DEFAULT_IOU_THRESHOLD,
     DEFAULT_MODEL_ID,
+    DEFAULT_NMS_THRESHOLD,
     DetectionClass,
+    EVENT_CLASS_IDS,
     OTHER_CLASS_IDS,
     PLAYER_CLASS_IDS,
+    PLAYER_MIN_CONFIDENCE,
     BasketballDetector,
+    apply_class_floors,
+    apply_nms,
+    clean_event_detections,
     jersey_crops,
+    keep_top1_per_class,
 )
 from .ocr import (
     DEFAULT_OCR_MODEL_ID,
@@ -18,18 +26,26 @@ from .ocr import (
 )
 
 __all__ = [
+    "CLASS_CONFIDENCE",
     "CLASS_NAMES",
     "DEFAULT_CONFIDENCE",
     "DEFAULT_IOU_THRESHOLD",
     "DEFAULT_MODEL_ID",
+    "DEFAULT_NMS_THRESHOLD",
     "DEFAULT_OCR_MODEL_ID",
     "DEFAULT_OCR_PROMPT",
     "DetectionClass",
+    "EVENT_CLASS_IDS",
     "JerseyOCR",
     "OTHER_CLASS_IDS",
     "PLAYER_CLASS_IDS",
+    "PLAYER_MIN_CONFIDENCE",
     "BasketballDetector",
+    "apply_class_floors",
+    "apply_nms",
+    "clean_event_detections",
     "crop_number_boxes",
     "jersey_crops",
+    "keep_top1_per_class",
     "match_numbers_to_players",
 ]

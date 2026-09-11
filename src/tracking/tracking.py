@@ -131,6 +131,62 @@ def get_state_matches(
     return matches
 
 
+def unmatched_detections(
+    detections: sv.Detections,
+    tracked: sv.Detections,
+    iou_threshold: float = MATCH_IOU_THRESHOLD,
+) -> sv.Detections:
+    """Keep detector boxes that do not overlap an existing SAM2 track."""
+    if len(detections) == 0:
+        return detections
+    if len(tracked) == 0:
+        return detections
+    iou = sv.box_iou_batch(detections.xyxy, tracked.xyxy)
+    keep = iou.max(axis=1) < iou_threshold
+    return detections[keep]
+
+
+def select_new_player_prompts(
+    detections: sv.Detections,
+    tracked: sv.Detections,
+    slots_left: int,
+    iou_threshold: float = MATCH_IOU_THRESHOLD,
+) -> sv.Detections:
+    """Highest-confidence unmatched player boxes, at most ``slots_left``."""
+    leftover = unmatched_detections(detections, tracked, iou_threshold)
+    if slots_left <= 0 or len(leftover) == 0:
+        return leftover[np.zeros(len(leftover), dtype=bool)]
+    if leftover.confidence is not None:
+        leftover = leftover[np.argsort(-leftover.confidence)]
+    return leftover[: int(slots_left)]
+
+
+def concat_player_detections(
+    tracked: sv.Detections,
+    new: sv.Detections,
+) -> sv.Detections:
+    """Append newly prompted boxes onto the current SAM2 detections."""
+    if len(new) == 0:
+        return tracked
+    if len(tracked) == 0:
+        return new
+    xyxy = np.concatenate([tracked.xyxy, new.xyxy], axis=0)
+    tracker_id = np.concatenate(
+        [
+            np.asarray(tracked.tracker_id, dtype=int),
+            np.asarray(new.tracker_id, dtype=int),
+        ]
+    )
+    mask = None
+    if tracked.mask is not None:
+        extra = np.zeros(
+            (len(new), tracked.mask.shape[1], tracked.mask.shape[2]),
+            dtype=bool,
+        )
+        mask = np.concatenate([tracked.mask, extra], axis=0)
+    return sv.Detections(xyxy=xyxy, mask=mask, tracker_id=tracker_id)
+
+
 class SAM2Tracker:
     """Prompt SAM2 on the first frame, then track player masks over time."""
 
@@ -201,6 +257,44 @@ class SAM2Tracker:
 
         xyxy = sv.mask_to_xyxy(masks=masks)
         return sv.Detections(xyxy=xyxy, mask=masks, tracker_id=tracker_ids)
+
+    def add_prompts(self, detections: sv.Detections) -> None:
+        """Register extra boxes as new SAM2 objects on the last tracked frame.
+
+        The real-time camera predictor rejects new ``obj_id``s after tracking
+        starts. Temporarily clear that flag (same idea as
+        ``add_new_prompt_during_track``) so missing players can be added
+        without resetting existing IDs.
+        """
+        if not self._prompted:
+            raise RuntimeError("Call prompt_first_frame before add_prompts")
+        if len(detections) == 0:
+            return
+        if detections.tracker_id is None:
+            raise ValueError("detections must contain tracker_id")
+
+        predictor = self.predictor
+        state = getattr(predictor, "condition_state", None)
+        if isinstance(state, dict):
+            state["tracking_has_started"] = False
+        frame_idx = self._last_tracked_frame_idx()
+
+        with _track_context():
+            for xyxy, obj_id in zip(detections.xyxy, detections.tracker_id):
+                bbox = np.asarray([xyxy], dtype=np.float32)
+                predictor.add_new_prompt(
+                    frame_idx=frame_idx,
+                    obj_id=int(obj_id),
+                    bbox=bbox,
+                )
+
+    def _last_tracked_frame_idx(self) -> int:
+        predictor = self.predictor
+        state = getattr(predictor, "condition_state", None)
+        if isinstance(state, dict) and state.get("num_frames"):
+            return max(int(state["num_frames"]) - 1, 0)
+        idx = getattr(predictor, "frame_idx", 0)
+        return max(int(idx), 0)
 
     def reset(self) -> None:
         self._prompted = False

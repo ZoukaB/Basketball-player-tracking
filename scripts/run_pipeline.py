@@ -7,7 +7,6 @@ Usage (from the repo root, with .env containing ROBOFLOW_API_KEY):
     python scripts/run_pipeline.py --video path/to/clip.mp4 --max-frames 30
     python scripts/run_pipeline.py --video path/to/clip.mp4 --fps 10
     python scripts/run_pipeline.py --video path/to/clip.mp4 --ocr
-    python scripts/render_detections.py --run-dir outputs/clip
 """
 
 from __future__ import annotations

@@ -3,7 +3,10 @@
 Assembles the notebook into one pass over a video:
 
 1. Roboflow RF-DETR object detection (players, jersey numbers, events)
-2. SAM2 tracking (stable ``tracker_id`` + masks)
+   Event boxes are cleaned with class-agnostic NMS, top-1 per class, and
+   per-class confidence floors (same chain as ``notebooks/testing.ipynb``).
+2. SAM2 tracking (stable ``tracker_id`` + masks). If frame 0 has fewer than
+   10 players, unmatched RF-DETR boxes are added every 5 seconds until 10.
 3. Jersey OCR + team clustering (name / number from the roster)
 4. Court keypoints + homography, then ``clean_paths`` smoothing
 
@@ -46,6 +49,7 @@ from src.detection import (
     BasketballDetector,
     DetectionClass,
     JerseyOCR,
+    clean_event_detections,
     jersey_crops,
 )
 from src.pipeline.history import (
@@ -56,7 +60,12 @@ from src.pipeline.history import (
 )
 from src.pipeline.rosters import DEFAULT_TEAM_NAMES, TEAM_ROSTERS
 from src.pipeline.shots import ShotCollector, attach_identity_and_court, empty_shots_df
-from src.tracking import SAM2Tracker, get_state_matches
+from src.tracking import (
+    SAM2Tracker,
+    concat_player_detections,
+    get_state_matches,
+    select_new_player_prompts,
+)
 
 # --- notebook constants -------------------------------------------------------
 TEAM_CROP_STRIDE = 30          # ~1 FPS at 30 FPS, used to fit TeamClassifier
@@ -66,6 +75,8 @@ TEAM_VALIDATE_STREAK = 1       # teams are assigned once on the first frame
 STATE_NMS_THRESHOLD = 0.5      # class-agnostic NMS on player-state boxes
 STATE_IOU_THRESHOLD = 0.3      # IoU to attach RF-DETR states onto SAM2 tracks
 DEFAULT_TARGET_FPS = 10.0      # subsample the source video to this rate
+TARGET_PLAYERS = 10            # stop adding SAM2 tracks once this many exist
+REPROMPT_SECONDS = 5.0         # if under TARGET_PLAYERS, try again this often
 
 
 def frame_stride(source_fps: float, target_fps: float | None) -> int:
@@ -167,9 +178,22 @@ class BasketballPipeline:
         first_players = self.detector.detect_players(
             first_frame,
             assign_tracker_ids=True,
+            nms_threshold=STATE_NMS_THRESHOLD,
         )
         if len(first_players) == 0:
             raise RuntimeError("No players detected on the first frame.")
+        if len(first_players) > TARGET_PLAYERS:
+            print(
+                f"warning: prompting SAM2 with {len(first_players)} player boxes "
+                f"(expected {TARGET_PLAYERS}). Extra IDs are usually duplicate "
+                "classes on one body, or bench/crowd."
+            )
+        elif len(first_players) < TARGET_PLAYERS:
+            print(
+                f"prompting SAM2 with {len(first_players)} player boxes; "
+                f"will add unmatched detections every {REPROMPT_SECONDS:.0f}s "
+                f"until {TARGET_PLAYERS} tracks"
+            )
 
         tracker_ids = np.asarray(first_players.tracker_id, dtype=int)
         id_to_col = {int(tid): i for i, tid in enumerate(tracker_ids)}
@@ -192,6 +216,7 @@ class BasketballPipeline:
         event_rows: list[dict] = []
         n_players = len(tracker_ids)
         shot_collector = ShotCollector(fps=process_fps)
+        reprompt_interval = max(1, int(round(process_fps * REPROMPT_SECONDS)))
 
         frame_generator = sv.get_video_frames_generator(str(video_path), stride=stride)
         total = None
@@ -206,20 +231,42 @@ class BasketballPipeline:
             # --- SAM2: propagate masks / tracker IDs ------------------------
             players = self.tracker.propagate(frame)
 
+            # --- RF-DETR: one inference, then notebook event cleaning -------
+            # Infer at 0.25 for recall. NMS → top-1 per class → class floors
+            # strip stacked labels and low-conf junk before shots / events.
+            all_dets = self.detector.infer(frame)
+            if (
+                n_players < TARGET_PLAYERS
+                and frame_idx > 0
+                and frame_idx % reprompt_interval == 0
+            ):
+                players, tracker_ids, id_to_col, n_added = self._add_missing_players(
+                    frame=frame,
+                    all_dets=all_dets,
+                    players=players,
+                    tracker_ids=tracker_ids,
+                    id_to_col=id_to_col,
+                    team_validator=team_validator,
+                )
+                if n_added:
+                    _pad_video_xy(video_xy, extra=n_added)
+                    n_players = len(tracker_ids)
+                    print(
+                        f"frame {frame_idx}: added {n_added} SAM2 track(s) "
+                        f"({n_players}/{TARGET_PLAYERS})"
+                    )
+
             # Same lists as the notebook, written to disk so RAM stays bounded.
             if history_dir is not None:
                 save_history_frame(history_dir, frame_idx, frame)
                 save_history_detections(history_dir, frame_idx, players)
 
-            # --- RF-DETR: one inference, then split by class ----------------
-            all_dets = self.detector.infer(frame)
-            state_dets, number_dets, other_dets = self.detector.split(all_dets)
-            if len(state_dets) > 0:
-                # Drop duplicate player-state boxes (possession vs standing, etc.).
-                state_dets = state_dets.with_nms(
-                    threshold=STATE_NMS_THRESHOLD,
-                    class_agnostic=True,
-                )
+            event_dets = clean_event_detections(
+                all_dets,
+                nms_iou=STATE_NMS_THRESHOLD,
+            )
+            state_dets, _, other_dets = self.detector.split(event_dets)
+            _, number_dets, _ = self.detector.split(all_dets)
 
             # --- Jersey OCR (optional): unresolved tracks, every OCR_STRIDE frames ---
             if self.use_ocr and self.ocr is not None:
@@ -292,7 +339,7 @@ class BasketballPipeline:
             )
             shot_collector.update(
                 frame_idx=frame_idx,
-                all_dets=all_dets,
+                all_dets=event_dets,
                 players=players,
                 court_xy=court_xy,
                 court=self.court,
@@ -369,6 +416,49 @@ class BasketballPipeline:
         if not crops:
             raise RuntimeError("No jersey crops found to fit TeamClassifier.")
         self.team_classifier.fit(crops)
+
+    def _add_missing_players(
+        self,
+        frame: np.ndarray,
+        all_dets: sv.Detections,
+        players: sv.Detections,
+        tracker_ids: np.ndarray,
+        id_to_col: dict[int, int],
+        team_validator,
+    ) -> tuple[sv.Detections, np.ndarray, dict[int, int], int]:
+        """Prompt SAM2 with unmatched RF-DETR boxes until TARGET_PLAYERS."""
+        slots_left = TARGET_PLAYERS - len(tracker_ids)
+        if slots_left <= 0:
+            return players, tracker_ids, id_to_col, 0
+
+        candidates = self.detector.filter_players(
+            all_dets,
+            nms_threshold=STATE_NMS_THRESHOLD,
+        )
+        new_dets = select_new_player_prompts(
+            candidates,
+            players,
+            slots_left=slots_left,
+            iou_threshold=STATE_IOU_THRESHOLD,
+        )
+        if len(new_dets) == 0:
+            return players, tracker_ids, id_to_col, 0
+
+        next_id = int(np.max(tracker_ids)) + 1
+        new_ids = np.arange(next_id, next_id + len(new_dets), dtype=int)
+        new_dets.tracker_id = new_ids
+        self.tracker.add_prompts(new_dets)
+
+        crops = jersey_crops(frame, new_dets)
+        if crops:
+            teams = np.array(self.team_classifier.predict(crops))
+            team_validator.update(tracker_ids=new_ids, values=teams)
+
+        for col_offset, tid in enumerate(new_ids):
+            id_to_col[int(tid)] = len(tracker_ids) + col_offset
+        tracker_ids = np.concatenate([tracker_ids, new_ids])
+        players = concat_player_detections(players, new_dets)
+        return players, tracker_ids, id_to_col, len(new_ids)
 
     @staticmethod
     def _first_frame(video_path: Path) -> np.ndarray:
@@ -450,6 +540,15 @@ class BasketballPipeline:
                 ]
             )
         return player_df.sort_values(["frame_idx", "tracker_id"]).reset_index(drop=True)
+
+
+def _pad_video_xy(video_xy: list[np.ndarray], extra: int) -> None:
+    """Add NaN player columns to frames recorded before a new SAM2 track."""
+    if extra <= 0:
+        return
+    for i, arr in enumerate(video_xy):
+        pad = np.full((extra, 2), np.nan, dtype=float)
+        video_xy[i] = np.concatenate([arr, pad], axis=0)
 
 
 def _as_int(value) -> Optional[int]:
