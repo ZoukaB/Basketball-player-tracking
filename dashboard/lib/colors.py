@@ -1,81 +1,167 @@
-"""SkillCorner viz palette for dashboard charts.
-
-Pulls live values from ``skillcornerviz.utils.constants`` and
-``skillcornerviz.utils.skillcorner_colors``. Fallbacks match v1.2.2.
-"""
+"""Dashboard palette: SkillCorner green plus white, gray, and black."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-# skillcornerviz 1.2.2 (PHYSICAL PITCH / PITCH SHADOW / GREEN_TO_RED_SCALE).
-_FALLBACK = {
-    "PRIMARY_HIGHLIGHT_COLOR": "#00C800",
-    "TEXT_COLOR": "#001400",
-    "BASE_COLOR": "#D9D9D6",
-    "MISS_COLOR": "#FF1A1A",
-    "LIME": "#32FE6B",
-    "BLUE": "#4D5CFF",
-    "TEAL": "#17D9BA",
-}
+GREEN = "#006D00"
+WHITE = "#FFFFFF"
+GRAY = "#E8E8E8"
+MUTED = "#6B6B6B"
+BLACK = "#111111"
 
 
 @dataclass(frozen=True)
 class SkillCornerColors:
-    made: str
-    miss: str
-    court_line: str
-    background: str
-    text: str
-    lime: str
-    blue: str
-    teal: str
+    green: str = GREEN
+    white: str = WHITE
+    gray: str = GRAY
+    muted: str = MUTED
+    black: str = BLACK
+    made: str = GREEN
+    miss: str = BLACK
+    court_line: str = BLACK
+    background: str = WHITE
+    text: str = BLACK
+    banner: str = GREEN
     font: str = "Roboto, Helvetica, Arial, sans-serif"
 
 
-def _from_skillcornerviz() -> dict[str, str] | None:
-    try:
-        from skillcornerviz.utils import constants
-        from skillcornerviz.utils import skillcorner_colors as sc_colors
-    except ImportError:
-        return None
-
-    values = dict(_FALLBACK)
-    values["PRIMARY_HIGHLIGHT_COLOR"] = str(constants.PRIMARY_HIGHLIGHT_COLOR)
-    values["TEXT_COLOR"] = str(constants.TEXT_COLOR)
-    values["BASE_COLOR"] = str(constants.BASE_COLOR)
-
-    reds = getattr(sc_colors, "red_hex_codes", {}) or {}
-    if "SCREEN HEX" in reds:
-        values["MISS_COLOR"] = str(reds["SCREEN HEX"])
-    elif getattr(constants, "GREEN_TO_RED_SCALE", None):
-        values["MISS_COLOR"] = str(constants.GREEN_TO_RED_SCALE[0])
-
-    greens = getattr(sc_colors, "greens", {}) or {}
-    digital = greens.get("DIGITAL PITCH") or {}
-    if "BASE" in digital:
-        values["LIME"] = str(digital["BASE"])
-    else:
-        values["LIME"] = str(getattr(constants, "DARK_PRIMARY_HIGHLIGHT_COLOR", values["LIME"]))
-
-    blues = getattr(sc_colors, "blue_hex_codes", {}) or {}
-    if "SCREEN HEX" in blues:
-        values["BLUE"] = str(blues["SCREEN HEX"])
-    teals = getattr(sc_colors, "teal_hex_codes", {}) or {}
-    if "SCREEN HEX" in teals:
-        values["TEAL"] = str(teals["SCREEN HEX"])
-    return values
-
-
 def load_colors() -> SkillCornerColors:
-    values = _from_skillcornerviz() or dict(_FALLBACK)
-    return SkillCornerColors(
-        made=values["PRIMARY_HIGHLIGHT_COLOR"],
-        miss=values["MISS_COLOR"],
-        court_line=values["TEXT_COLOR"],
-        background=values["BASE_COLOR"],
-        text=values["TEXT_COLOR"],
-        lime=values["LIME"],
-        blue=values["BLUE"],
-        teal=values["TEAL"],
-    )
+    return SkillCornerColors()
+
+
+def theme_css(colors: SkillCornerColors | None = None) -> str:
+    colors = colors or load_colors()
+    return f"""
+    <style>
+        html, body, [data-testid="stAppViewContainer"],
+        [data-testid="stMain"], [data-testid="stMainBlockContainer"],
+        .stApp, .main {{
+            background-color: {colors.white} !important;
+            color: {colors.black};
+            overflow: hidden !important;
+            height: 100vh !important;
+            max-height: 100vh !important;
+        }}
+        [data-testid="stHeader"],
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"],
+        [data-testid="stBottom"],
+        [data-testid="stStatusWidget"],
+        [data-testid="stSidebar"],
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="stSidebarNav"],
+        footer {{
+            display: none !important;
+        }}
+        .block-container {{
+            padding: 0 !important;
+            max-width: 100% !important;
+            overflow: hidden !important;
+        }}
+        [data-testid="stVerticalBlock"] {{
+            gap: 0 !important;
+        }}
+        [data-testid="stElementContainer"] {{
+            margin-bottom: 0 !important;
+        }}
+        iframe {{
+            overflow: hidden !important;
+        }}
+        [data-testid="stHorizontalBlock"]:has([data-testid="stPopover"]) {{
+            background: {colors.banner} !important;
+            padding: 10px 16px !important;
+            min-height: 56px;
+            align-items: center;
+        }}
+        [data-testid="stPopover"] {{
+            width: 100%;
+        }}
+        [data-testid="stPopover"] button {{
+            background-color: {colors.white} !important;
+            color: {colors.black} !important;
+            border: 1px solid {colors.gray} !important;
+            font-weight: 600;
+            min-width: 10rem;
+            width: 100% !important;
+            height: 2.4rem !important;
+        }}
+        [data-testid="stPopover"] button p,
+        [data-testid="stPopover"] button span,
+        [data-testid="stPopover"] button div {{
+            color: {colors.black} !important;
+        }}
+        div[data-baseweb="popover"] {{
+            background-color: {colors.white} !important;
+        }}
+        div[data-baseweb="popover"] label,
+        div[data-baseweb="popover"] p,
+        div[data-baseweb="popover"] span {{
+            color: {colors.black} !important;
+        }}
+        [data-testid="stHorizontalBlock"]:not(:has([data-testid="stPopover"])) {{
+            height: calc(100vh - 56px) !important;
+            max-height: calc(100vh - 56px) !important;
+            overflow: hidden !important;
+        }}
+        .stSelectbox label {{
+            color: {colors.black} !important;
+            font-weight: 600;
+        }}
+        .stSelectbox [data-baseweb="select"] > div {{
+            background-color: {colors.white} !important;
+            color: {colors.black} !important;
+            border: 1px solid {colors.muted} !important;
+        }}
+        .stSelectbox [data-baseweb="select"] span {{
+            color: {colors.black} !important;
+        }}
+        [data-baseweb="menu"] {{
+            background-color: {colors.white} !important;
+        }}
+        [data-baseweb="menu"] li {{
+            color: {colors.black} !important;
+        }}
+        .placeholder-bust {{
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            background: {colors.gray};
+            border: 2px solid {colors.black};
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }}
+        .placeholder-bust svg {{ width: 36px; height: 36px; fill: {colors.black}; }}
+        .info-name {{
+            font-size: 1.35rem;
+            font-weight: 700;
+            line-height: 1.2;
+            margin: 0;
+            color: {colors.black};
+            font-family: {colors.font};
+        }}
+        .info-meta {{
+            margin: 0.45rem 0 0.6rem 0;
+            font-size: 0.92rem;
+            line-height: 1.55;
+            color: {colors.black};
+            font-family: {colors.font};
+        }}
+        .info-panel {{
+            padding: 12px 16px 8px 20px;
+            background: {colors.white};
+            overflow: visible;
+        }}
+        .stPlotlyChart,
+        .stPlotlyChart > div,
+        .js-plotly-plot,
+        .plot-container {{
+            height: calc(100vh - 56px) !important;
+            max-height: calc(100vh - 56px) !important;
+            overflow: hidden !important;
+        }}
+    </style>
+    """

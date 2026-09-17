@@ -1,4 +1,4 @@
-"""Plotly half-court shot chart with SkillCorner colors."""
+"""Plotly half-court shot chart with hoop at the bottom."""
 
 from __future__ import annotations
 
@@ -6,13 +6,14 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from .colors import SkillCornerColors, load_colors
-from .court import COURT_WIDTH, HALF_COURT_LENGTH, court_shapes
+from .court import COURT_WIDTH, HALF_COURT_LENGTH, court_shapes, to_display
 
 
 def build_shot_chart(
     shots: pd.DataFrame,
     colors: SkillCornerColors | None = None,
     title: str | None = None,
+    height: int = 560,
 ) -> go.Figure:
     colors = colors or load_colors()
     fig = go.Figure()
@@ -49,33 +50,43 @@ def build_shot_chart(
             )
         return rows
 
+    def _xy(df: pd.DataFrame) -> tuple[list[float], list[float]]:
+        xs, ys = [], []
+        for x, y in zip(df["x_court"], df["y_court"]):
+            dx, dy = to_display(float(x), float(y))
+            xs.append(dx)
+            ys.append(dy)
+        return xs, ys
+
     if len(made):
+        mx, my = _xy(made)
         fig.add_trace(
             go.Scatter(
-                x=made["x_court"],
-                y=made["y_court"],
+                x=mx,
+                y=my,
                 mode="markers",
                 name="Made",
                 marker={
                     "symbol": "circle",
-                    "size": 11,
+                    "size": 10,
                     "color": colors.made,
-                    "line": {"width": 0.6, "color": colors.text},
+                    "line": {"width": 0.5, "color": colors.black},
                 },
                 customdata=_customdata(made),
                 hovertemplate=hover,
             )
         )
     if len(missed):
+        xx, xy = _xy(missed)
         fig.add_trace(
             go.Scatter(
-                x=missed["x_court"],
-                y=missed["y_court"],
+                x=xx,
+                y=xy,
                 mode="markers",
                 name="Missed",
                 marker={
                     "symbol": "x",
-                    "size": 10,
+                    "size": 9,
                     "color": colors.miss,
                     "line": {"width": 2, "color": colors.miss},
                 },
@@ -84,24 +95,22 @@ def build_shot_chart(
             )
         )
 
-    margin = 1.5
-    fig.update_layout(
-        title=title or "Shot Chart",
-        title_font={"family": colors.font, "color": colors.text, "size": 20},
-        font={"family": colors.font, "color": colors.text},
-        paper_bgcolor=colors.background,
-        plot_bgcolor=colors.background,
-        shapes=court_shapes(colors),
-        xaxis={
-            "range": [-margin, HALF_COURT_LENGTH + margin],
+    margin = 1.0
+    layout = {
+        "font": {"family": colors.font, "color": colors.black},
+        "paper_bgcolor": colors.white,
+        "plot_bgcolor": colors.white,
+        "shapes": court_shapes(colors),
+        "xaxis": {
+            "range": [-margin, COURT_WIDTH + margin],
             "showgrid": False,
             "zeroline": False,
             "showticklabels": False,
             "title": None,
             "fixedrange": True,
         },
-        yaxis={
-            "range": [-margin, COURT_WIDTH + margin],
+        "yaxis": {
+            "range": [-margin, HALF_COURT_LENGTH + margin],
             "showgrid": False,
             "zeroline": False,
             "showticklabels": False,
@@ -110,14 +119,21 @@ def build_shot_chart(
             "scaleratio": 1,
             "fixedrange": True,
         },
-        legend={
+        "legend": {
             "orientation": "h",
             "yanchor": "bottom",
-            "y": 1.02,
+            "y": 1.01,
             "xanchor": "right",
             "x": 1,
+            "font": {"color": colors.black},
+            "bgcolor": colors.white,
         },
-        margin={"l": 20, "r": 20, "t": 60, "b": 20},
-        height=720,
-    )
+        "margin": {"l": 4, "r": 4, "t": 24 if title else 4, "b": 4},
+        "height": height,
+        "autosize": True,
+    }
+    if title:
+        layout["title"] = title
+        layout["title_font"] = {"family": colors.font, "color": colors.black, "size": 18}
+    fig.update_layout(**layout)
     return fig

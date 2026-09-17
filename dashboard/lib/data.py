@@ -116,25 +116,21 @@ def load_shots(path: str | Path) -> pd.DataFrame:
 def filter_shots(
     df: pd.DataFrame,
     *,
-    teams: list[str] | None = None,
-    players: list[str] | None = None,
-    shot_types: list[str] | None = None,
-    results: list[str] | None = None,
-    min_confidence: float | None = None,
+    team: str | None = None,
+    player: str | None = None,
+    shot_type: str | None = None,
+    result: str | None = None,
 ) -> pd.DataFrame:
+    """Keep shots for one team, optional player, and optional type/result."""
     subset = df
-    if teams:
-        subset = subset[subset["team"].isin(teams)]
-    if players:
-        subset = subset[subset["name"].isin(players)]
-    if shot_types:
-        subset = subset[subset["shot_type"].isin(shot_types)]
-    if results:
-        subset = subset[subset["result"].isin(results)]
-    if min_confidence is not None and subset["confidence"].notna().any():
-        subset = subset[
-            subset["confidence"].isna() | (subset["confidence"] >= min_confidence)
-        ]
+    if team:
+        subset = subset[subset["team"] == team]
+    if player:
+        subset = subset[subset["name"] == player]
+    if shot_type and shot_type != "All":
+        subset = subset[subset["shot_type"] == shot_type]
+    if result and result != "All":
+        subset = subset[subset["result"] == result]
     return subset.reset_index(drop=True)
 
 
