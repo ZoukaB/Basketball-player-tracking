@@ -21,8 +21,8 @@ import numpy as np
 import supervision as sv
 import torch
 
-DEFAULT_SAM2_CHECKPOINT = "checkpoints/sam2.1_hiera_large.pt"
-DEFAULT_SAM2_CONFIG = "configs/sam2.1/sam2.1_hiera_l.yaml"
+DEFAULT_SAM2_CHECKPOINT = "checkpoints/sam2.1_hiera_tiny.pt"
+DEFAULT_SAM2_CONFIG = "configs/sam2.1/sam2.1_hiera_t.yaml"
 MASK_EDGE_DISTANCE = 0.03
 MATCH_IOU_THRESHOLD = 0.3
 
@@ -297,4 +297,11 @@ class SAM2Tracker:
         return max(int(idx), 0)
 
     def reset(self) -> None:
+        """Drop SAM2 memory so the next prompt_first_frame starts a new shot."""
         self._prompted = False
+        predictor = self.predictor
+        if hasattr(predictor, "reset_state"):
+            try:
+                predictor.reset_state()
+            except Exception:
+                pass
