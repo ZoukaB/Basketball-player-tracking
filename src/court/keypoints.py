@@ -51,9 +51,9 @@ def landmarks_mask(
     anchor_confidence: float = DEFAULT_ANCHOR_CONFIDENCE,
 ) -> np.ndarray:
     """Boolean mask of keypoints above the anchor-confidence threshold."""
-    if key_points.keypoint_confidence is None or len(key_points) == 0:
+    if key_points.confidence is None or len(key_points) == 0:
         return np.zeros((0,), dtype=bool)
-    return key_points.keypoint_confidence[0] > anchor_confidence
+    return key_points.confidence[0] > anchor_confidence
 
 
 def court_transformer(

@@ -220,6 +220,7 @@ class SAM2Tracker:
 
         with _track_context():
             self.predictor.load_first_frame(frame)
+            self.predictor.frame_idx = 0
             for xyxy, obj_id in zip(detections.xyxy, detections.tracker_id):
                 bbox = np.asarray([xyxy], dtype=np.float32)
                 self.predictor.add_new_prompt(
@@ -258,35 +259,27 @@ class SAM2Tracker:
         xyxy = sv.mask_to_xyxy(masks=masks)
         return sv.Detections(xyxy=xyxy, mask=masks, tracker_id=tracker_ids)
 
-    def add_prompts(self, detections: sv.Detections) -> None:
-        """Register extra boxes as new SAM2 objects on the last tracked frame.
+    def add_prompts(
+        self,
+        frame: np.ndarray,
+        tracked: sv.Detections,
+        new: sv.Detections,
+    ) -> None:
+        """Restart SAM2 on this frame with existing tracks + new players.
 
-        The real-time camera predictor rejects new ``obj_id``s after tracking
-        starts. Temporarily clear that flag (same idea as
-        ``add_new_prompt_during_track``) so missing players can be added
-        without resetting existing IDs.
+        The camera predictor stacks per-frame memory across a fixed object
+        set, so objects cannot be added mid-track. Re-prompting keeps the
+        existing tracker_ids and only drops memory from earlier frames.
         """
-        if not self._prompted:
-            raise RuntimeError("Call prompt_first_frame before add_prompts")
-        if len(detections) == 0:
+        if len(new) == 0:
             return
-        if detections.tracker_id is None:
-            raise ValueError("detections must contain tracker_id")
-
-        predictor = self.predictor
-        state = getattr(predictor, "condition_state", None)
-        if isinstance(state, dict):
-            state["tracking_has_started"] = False
-        frame_idx = self._last_tracked_frame_idx()
-
-        with _track_context():
-            for xyxy, obj_id in zip(detections.xyxy, detections.tracker_id):
-                bbox = np.asarray([xyxy], dtype=np.float32)
-                predictor.add_new_prompt(
-                    frame_idx=frame_idx,
-                    obj_id=int(obj_id),
-                    bbox=bbox,
-                )
+        # keep only tracks that are still visible (non-empty mask)
+        if tracked.mask is not None and len(tracked) > 0:
+            visible = tracked.mask.reshape(len(tracked), -1).any(axis=1)
+            tracked = tracked[visible]
+        prompts = concat_player_detections(tracked, new)
+        self.reset()
+        self.prompt_first_frame(frame, prompts)
 
     def _last_tracked_frame_idx(self) -> int:
         predictor = self.predictor

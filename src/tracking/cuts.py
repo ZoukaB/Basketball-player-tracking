@@ -5,7 +5,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-THRESHOLD_HIGH = 0.975
+THRESHOLD_HIGH = 0.995
 THRESHOLD_LOW = 0.70
 THRESHOLD_PIXEL = 0.85
 
@@ -62,3 +62,32 @@ def detect_hard_cuts(
         )
         return True
     return False
+
+class HardCutDetector:
+    """Looks at every frame and remembers if a hard cut happened."""
+
+    def __init__(self, min_gap: int = 15):
+        self.min_gap = min_gap           # ignore cuts closer than N source frames to the last one
+        self.previous_frame = None
+        self.last_cut = -min_gap
+        self.pending = False             # True if a cut happened since the last pop()
+        self.cuts: list[int] = []        # source frame indices of all cuts
+
+    def update(self, frame: np.ndarray, source_idx: int) -> bool:
+        """Call on EVERY source frame. Returns True if this frame is a cut."""
+        is_cut = (
+            self.previous_frame is not None
+            and source_idx - self.last_cut >= self.min_gap
+            and detect_hard_cuts(source_idx, frame, self.previous_frame)
+        )
+        self.previous_frame = frame
+        if is_cut:
+            self.last_cut = source_idx
+            self.cuts.append(source_idx)
+            self.pending = True
+        return is_cut
+
+    def pop(self) -> bool:
+        """True if a cut happened since the last call, then resets the flag."""
+        flag, self.pending = self.pending, False
+        return flag

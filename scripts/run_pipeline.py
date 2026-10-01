@@ -7,6 +7,7 @@ Usage (from the repo root, with .env containing ROBOFLOW_API_KEY):
     python scripts/run_pipeline.py --video path/to/clip.mp4 --max-frames 30
     python scripts/run_pipeline.py --video path/to/clip.mp4 --fps 10
     python scripts/run_pipeline.py --video path/to/clip.mp4 --ocr
+    python scripts/run_pipeline.py --video path/to/clip.mp4 --video-out
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from src.utils import load_api_keys
 
 load_api_keys(REPO_ROOT / ".env")
 
-from src.pipeline import DEFAULT_TEAM_NAMES, BasketballPipeline
+from src.pipeline import DEFAULT_TEAM_NAMES, BasketballPipeline, run_video
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,7 +57,31 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Run jersey OCR to fill number/name in identity_df (default: off)",
     )
+    parser.add_argument(
+        "--video-out",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Also render an annotated MP4 with player masks, tracker IDs, and "
+            "possession / jumpshot / layup boxes (default: off)"
+        ),
+    )
     return parser.parse_args()
+
+
+def print_tables(result) -> None:
+    print("identity_df")
+    print(result.identity_df.to_string(index=False))
+    print()
+    print("player_df (head)")
+    print(result.player_df.head(20).to_string(index=False))
+    print()
+    print("event_df (head)")
+    print(result.event_df.head(20).to_string(index=False))
+    print()
+    print(f"player_df rows: {len(result.player_df)}")
+    print(f"event_df rows:  {len(result.event_df)}")
+    print(f"shots_df rows:  {len(result.shots_df)}")
 
 
 def main() -> None:
@@ -70,6 +95,19 @@ def main() -> None:
         team_names=dict(DEFAULT_TEAM_NAMES),
         use_ocr=args.ocr,
     )
+
+    if args.video_out:
+        # run_video writes the same CSVs plus the shot chart and the clip.
+        video_run = run_video(
+            video_path,
+            output_dir=args.output_dir,
+            max_frames=args.max_frames,
+            target_fps=None if args.fps == 0 else args.fps,
+            pipeline=pipeline,
+        )
+        print_tables(video_run.result)
+        return
+
     result = pipeline.run(
         video_path,
         max_frames=args.max_frames,
@@ -86,23 +124,12 @@ def main() -> None:
     result.identity_df.to_csv(identity_path, index=False)
     result.shots_df.to_csv(shots_path, index=False)
 
-    print("identity_df")
-    print(result.identity_df.to_string(index=False))
-    print()
-    print("player_df (head)")
-    print(result.player_df.head(20).to_string(index=False))
-    print()
-    print("event_df (head)")
-    print(result.event_df.head(20).to_string(index=False))
-    print()
     print(f"wrote {player_path}")
     print(f"wrote {event_path}")
     print(f"wrote {identity_path}")
     print(f"wrote {shots_path}")
     print(f"history: {history_dir}")
-    print(f"player_df rows: {len(result.player_df)}")
-    print(f"event_df rows:  {len(result.event_df)}")
-    print(f"shots_df rows:  {len(result.shots_df)}")
+    print_tables(result)
 
 
 if __name__ == "__main__":

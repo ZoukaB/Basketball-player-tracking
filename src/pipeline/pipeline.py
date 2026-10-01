@@ -57,6 +57,7 @@ from src.pipeline.history import (
     save_history_detections,
     save_history_frame,
     save_history_meta,
+    save_history_states,
 )
 from src.pipeline.rosters import DEFAULT_TEAM_NAMES, TEAM_ROSTERS
 from src.pipeline.shots import ShotCollector, attach_identity_and_court, empty_shots_df
@@ -65,6 +66,9 @@ from src.tracking import (
     concat_player_detections,
     get_state_matches,
     select_new_player_prompts,
+)
+from src.tracking.cuts import(
+    HardCutDetector
 )
 
 # --- notebook constants -------------------------------------------------------
@@ -218,6 +222,7 @@ class BasketballPipeline:
         shot_collector = ShotCollector(fps=process_fps)
         reprompt_interval = max(1, int(round(process_fps * REPROMPT_SECONDS)))
 
+        cut_detector = HardCutDetector(min_gap= 0.5*process_fps)   # 5 processed frames = 0.5 s at 10 fps
         frame_generator = sv.get_video_frames_generator(str(video_path), stride=stride)
         total = None
         if video_info.total_frames:
@@ -228,6 +233,11 @@ class BasketballPipeline:
             if max_frames is not None and frame_idx >= max_frames:
                 break
 
+            hard_cut = cut_detector.update(frame, frame_idx)    # <- THE FLAG
+            if hard_cut:
+                print(f"frame {frame_idx}: HARD CUT")
+
+            # ... rest of the loop unchanged ...
             # --- SAM2: propagate masks / tracker IDs ------------------------
             players = self.tracker.propagate(frame)
 
@@ -267,6 +277,9 @@ class BasketballPipeline:
             )
             state_dets, _, other_dets = self.detector.split(event_dets)
             _, number_dets, _ = self.detector.split(all_dets)
+
+            if history_dir is not None:
+                save_history_states(history_dir, frame_idx, state_dets)
 
             # --- Jersey OCR (optional): unresolved tracks, every OCR_STRIDE frames ---
             if self.use_ocr and self.ocr is not None:
