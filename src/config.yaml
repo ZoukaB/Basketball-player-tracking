@@ -1,0 +1,118 @@
+# Basketball broadcast analysis pipeline
+# Single input clip per run (edited broadcast: one possession per file).
+
+input:
+  video: data/boston-celtics-new-york-knicks-game-1-q2-10.36-10.32.mp4
+
+output:
+  dir: outputs
+  annotated_video: outputs/annotated.mp4
+  tracks_csv: outputs/tracks.csv
+  shots_json: outputs/shots.json
+  shot_map: outputs/shot_map.png
+
+analysis:
+  # Global analysis fps: single stride applied to the whole pipeline (RF-DETR + SAM2).
+  # Wired into run.py in brick 2. Video is 30 fps, so 10 => every 3rd frame.
+  fps: 10
+
+detection:
+  model_id: basketball-player-detection-3-ycjdo/4
+  confidence: 0.4
+  iou_threshold: 0.9
+  class_agnostic_nms: false
+  # Per-class geometric/confidence floors ("class_floor"). Any class without an
+  # explicit entry falls back to `default`. `player` is only a SAM2 seed, so its
+  # floor is a light sliver guard; event classes are kept lenient.
+  class_floor:
+    default:              {confidence: 0.40, min_width: 8, min_height: 8, min_area: 200, max_aspect: 8.0}
+    player:               {confidence: 0.40, min_height: 40, max_aspect: 5.0}
+    player_in_possession: {confidence: 0.40}
+    player_jump_shot:     {confidence: 0.40}
+    player_layup_dunk:    {confidence: 0.40}
+    ball:                 {confidence: 0.35, min_width: 6, min_height: 6, min_area: 50, max_aspect: 3.0}
+    rim:                  {confidence: 0.30}
+    number:               {confidence: 0.55, min_width: 6, min_height: 8, max_aspect: 3.0}
+    referee:              {confidence: 0.40}
+  # Drop border slivers: box touching a frame edge and narrower than this.
+  edge_margin_px: 3
+  edge_min_width: 45
+  # NMS: merge duplicate boxes (e.g. layup/dunk in a crowded paint). Per-class so
+  # event labels are not suppressed by an overlapping `player` box.
+  nms:
+    enabled: true
+    iou_threshold: 0.6
+    class_agnostic: false
+
+# RF-DETR class ids (validated from the model at runtime in the smoke test).
+classes:
+  ball: 0
+  ball_in_basket: 1
+  number: 2
+  player: 3
+  player_in_possession: 4
+  player_jump_shot: 5
+  player_layup_dunk: 6
+  player_shot_block: 7
+  referee: 8
+  rim: 9
+  player_ids: [3, 4, 5, 6, 7]
+
+sam2:
+  variant: tiny
+  # `repo_dir` is the real-time SAM2 fork root; `checkpoint` is relative to it.
+  # `config` is relative to the SAM2 *package* (hydra config module root).
+  repo_dir: ../segment-anything-2-real-time
+  checkpoint: checkpoints/sam2.1_hiera_tiny.pt
+  config: configs/sam2.1/sam2.1_hiera_t.yaml
+  # apply_postprocessing=False keeps model.fill_hole_area=0, so the tracking path
+  # never calls the compiled `_C` extension (which is not built on this machine).
+  apply_postprocessing: false
+  seed_class_ids: [3]   # seed SAM2 from `player` only (event classes match later)
+  mask_filter:
+    relative_distance: 0.03
+    mode: edge
+
+teams:
+  device: cpu
+  batch_size: 32
+  fit_mode: bootstrap_online   # bootstrap_online | offline_stride
+  stride: 30
+  min_crops: 300
+  min_track_ids: 10
+  max_bootstrap_frames: 60
+  team_names:
+    0: Boston Celtics
+    1: New York Knicks
+  team_colors:
+    Boston Celtics: "#007A33"
+    New York Knicks: "#006BB6"
+
+keypoints:
+  model_id: basketball-court-detection-2/14
+  confidence: 0.3
+  anchor_confidence: 0.5
+  league: NBA
+  measurement_unit: FEET
+
+shots:
+  reset_time_frames_s: 1.7
+  min_frames_between_starts_s: 0.5
+  cooldown_frames_after_made_s: 0.5
+
+ocr:
+  enabled: false
+  model_id: basketball-jersey-numbers-ocr/7
+  prompt: "Read the number."
+  number_class_id: 2
+  match_threshold: 0.9
+  pad_px: 10
+  n_consecutive: 3
+
+cuts:
+  # Mean absolute grayscale frame difference (0-255) above which we treat the frame as a hard cut.
+  frame_diff_threshold: 40.0
+
+render:
+  annotated_video: true
+  court_keypoints: true
