@@ -29,7 +29,8 @@ SAMPLE_EVERY = 15
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Detection brick smoke test")
     parser.add_argument("--video", default=None, help="Path to a video (default: config input.video)")
-    parser.add_argument("--seconds", type=float, default=8.0, help="Only process the first N seconds")
+    parser.add_argument("--seconds", type=float, default=8.0, help="Process N seconds from --start (0 = to end)")
+    parser.add_argument("--start", type=float, default=0.0, help="Start offset in seconds (default 0)")
     parser.add_argument("--out-dir", default=None, help="Output dir (default: outputs/<video stem>)")
     parser.add_argument("--raw", action="store_true", help="Disable class_floor cleaning (raw detections)")
     return parser.parse_args()
@@ -47,14 +48,18 @@ def main() -> None:
 
     info = sv.VideoInfo.from_video_path(str(video_path))
     stride = analysis_stride(cfg, info.fps)
-    max_video_frames = int(round(args.seconds * info.fps)) if args.seconds else 0
-    max_frames = max_video_frames // stride if max_video_frames else 0
+    start_frame = int(round(args.start * info.fps)) if args.start else 0
+    span_frames = int(round(args.seconds * info.fps)) if args.seconds else 0
+    end_frame = start_frame + span_frames if span_frames else 0
+    max_frames = (end_frame - start_frame) // stride if end_frame else 0
 
     detector = Detector(cfg)
     print(f"Video: {video_path}")
+    end_label = f"{end_frame / info.fps:.1f}s" if end_frame else "end"
     print(
         f"  {info.width}x{info.height} @ {info.fps:.1f} fps, stride={stride} "
-        f"(analysis {info.fps / stride:.1f} fps), processing {max_frames} analysis frames ({args.seconds}s)"
+        f"(analysis {info.fps / stride:.1f} fps), window {args.start:.1f}s..{end_label}, "
+        f"{max_frames if max_frames else 'all'} analysis frames"
     )
     print(f"  Model: {detector.model_id} (conf={detector.confidence}, iou={detector.iou_threshold})")
     print(f"  Cleaning: {'OFF (raw)' if args.raw else 'ON'}  Outputs -> {out_dir}")
@@ -67,7 +72,9 @@ def main() -> None:
     box_annotator = sv.BoxAnnotator(thickness=2)
     label_annotator = sv.LabelAnnotator(text_scale=0.5, text_thickness=1)
 
-    frame_generator = sv.get_video_frames_generator(source_path=str(video_path), stride=stride)
+    frame_generator = sv.get_video_frames_generator(
+        source_path=str(video_path), start=start_frame, stride=stride
+    )
     for index, frame in enumerate(frame_generator):
         if max_frames and index >= max_frames:
             break
@@ -92,7 +99,7 @@ def main() -> None:
             text = [class_names.get(int(c), str(int(c))) for c in cleaned.class_id]
             annotated = box_annotator.annotate(scene=frame.copy(), detections=cleaned)
             annotated = label_annotator.annotate(scene=annotated, detections=cleaned, labels=text)
-            video_frame = index * stride
+            video_frame = start_frame + index * stride
             out_path = out_dir / f"frame_{video_frame:04d}.jpg"
             cv2.imwrite(str(out_path), annotated)
             print(

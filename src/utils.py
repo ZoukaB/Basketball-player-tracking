@@ -30,6 +30,11 @@ def setup_env() -> None:
         "CUDAExecutionProvider,CPUExecutionProvider",
     )
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    # SigLIP (teams) is expected to be cached locally; offline avoids a network
+    # metadata check that can fail in this environment. Set these env vars
+    # before huggingface_hub is imported. Unset them externally to allow downloads.
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 
 def load_config(path: str | Path | None = None) -> dict:

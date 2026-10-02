@@ -96,6 +96,17 @@ was occluded, then applied safely once all players were visible. Default
 `tests/test_tracking.py --reprompt-policy grow_on_new_max` while it's validated.
 
 
+## Team label stabilization (cluster index -> team name)
+
+`sports.TeamClassifier` (SigLIP + UMAP + KMeans) returns arbitrary cluster
+indices, and UMAP may vary between runs, so `teams.team_names` (0/1) can be
+flipped or unstable. Options to stabilize:
+- Decide the mapping from cluster appearance (e.g. dominant jersey colour:
+  green vs blue) instead of a fixed index.
+- Persist the fitted classifier + the chosen index->name mapping per game.
+- Seed UMAP (random_state) and verify via the per-cluster sample montage
+  produced by tests/test_teams.py.
+
 ## Speed (deprioritized)
 
 RF-DETR runs on CPU (onnxruntime CPU in `.venv`; `CUDAExecutionProvider`
