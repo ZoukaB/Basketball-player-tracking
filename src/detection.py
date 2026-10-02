@@ -54,6 +54,14 @@ class Detector:
         self.nms_iou = float(nms_cfg.get("iou_threshold", 0.6))
         self.nms_class_agnostic = bool(nms_cfg.get("class_agnostic", True))
 
+        ref_cfg = det_cfg.get("referee_suppression", {}) or {}
+        self.referee_suppression_enabled = bool(ref_cfg.get("enabled", False))
+        self.referee_iou_threshold = float(ref_cfg.get("iou_threshold", 0.5))
+        self.referee_suppress_classes = list(ref_cfg.get("classes", [3]))
+        self.referee_class_id = next(
+            (cid for cid, name in self.id_to_name.items() if name == "referee"), None
+        )
+
         self.model = get_model(model_id=self.model_id)
 
     # ------------------------------------------------------------------ setup
@@ -118,11 +126,35 @@ class Detector:
                 stats[reason] += 1
 
         cleaned = detections[keep]
+        if self.referee_suppression_enabled and len(cleaned) > 0:
+            cleaned, n_ref = self._suppress_referees(cleaned)
+            if n_ref:
+                stats["referee"] = stats.get("referee", 0) + n_ref
         if self.nms_enabled and len(cleaned) > 0:
             cleaned = cleaned.with_nms(
                 threshold=self.nms_iou, class_agnostic=self.nms_class_agnostic
             )
         return cleaned, dict(stats)
+
+    def _suppress_referees(self, detections: sv.Detections) -> tuple[sv.Detections, int]:
+        """Drop player-family boxes that overlap a referee box (RF-DETR double-labels)."""
+        if self.referee_class_id is None:
+            return detections, 0
+        ref_mask = detections.class_id == self.referee_class_id
+        if not ref_mask.any():
+            return detections, 0
+
+        ref_boxes = detections.xyxy[ref_mask]
+        keep = np.ones(len(detections), dtype=bool)
+        dropped = 0
+        for i in range(len(detections)):
+            if int(detections.class_id[i]) not in self.referee_suppress_classes:
+                continue
+            ious = sv.box_iou_batch(detections.xyxy[i : i + 1], ref_boxes).reshape(-1)
+            if ious.size and float(ious.max()) >= self.referee_iou_threshold:
+                keep[i] = False
+                dropped += 1
+        return detections[keep], dropped
 
     # ------------------------------------------------------------------ public
     def detect(self, frame: np.ndarray) -> sv.Detections:

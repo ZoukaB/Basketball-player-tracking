@@ -37,6 +37,12 @@ detection:
   # Drop border slivers: box touching a frame edge and narrower than this.
   edge_margin_px: 3
   edge_min_width: 45
+  # Drop `player` boxes that are actually referees: RF-DETR sometimes
+  # double-labels the referee as both class 3 and class 8. IoU >= threshold.
+  referee_suppression:
+    enabled: true
+    iou_threshold: 0.5
+    classes: [3]
   # NMS: merge duplicate boxes (e.g. layup/dunk in a crowded paint). Per-class so
   # event labels are not suppressed by an overlapping `player` box.
   nms:
@@ -72,6 +78,21 @@ sam2:
   mask_filter:
     relative_distance: 0.03
     mode: edge
+  # Re-prompt policy: when to re-seed SAM2 as more players become visible.
+  # grow_on_new_max: re-prompt when the cleaned detected-player count reaches a
+  # new maximum above the last prompt's count, sustained for `debounce_frames`
+  # and respecting `min_frames_between_reprompts`. A reset only happens when
+  # every currently tracked object is matched to a detection (match_iou), so an
+  # occluded player that SAM2 still tracks is never lost. Default `never` is the
+  # safety net; see notes/future_ideas.md.
+  reprompt_policy: never
+  debounce_frames: 3
+  min_frames_between_reprompts: 15
+  max_tracks: 12
+  # Detection-vs-track IoU below which a track counts as "unmatched" (occluded).
+  match_iou: 0.3
+  # Only used for a warning in the stable seed-once path (continuous video).
+  expected_players: 10
 
 teams:
   device: cpu
@@ -110,8 +131,12 @@ ocr:
   n_consecutive: 3
 
 cuts:
-  # Mean absolute grayscale frame difference (0-255) above which we treat the frame as a hard cut.
-  frame_diff_threshold: 40.0
+  # Brightness-invariant hard-cut score: per-frame z-normalized grayscale
+  # mean-absolute-difference. A real cut changes structure; a global exposure
+  # bump does not (removed by normalization). Validated on Bad_detections clip:
+  # cuts score ~0.72-0.76, everything else <= 0.25.
+  z_meandiff_threshold: 0.40
+  min_gap_frames: 5
 
 render:
   annotated_video: true

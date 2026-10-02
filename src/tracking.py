@@ -95,6 +95,46 @@ class SAM2Tracker:
         self._prompted = False
         return self.prompt_first_frame(frame, detections)
 
+    # -------------------------------------------------- additive object growth
+    def _next_obj_id(self) -> int:
+        ids = [int(i) for i in self.predictor.condition_state.get("obj_ids", [])]
+        return max(ids) + 1 if ids else 1
+
+    def add_object(self, frame: np.ndarray, bbox: np.ndarray) -> int:
+        """Add a new tracked object mid-stream WITHOUT resetting existing tracks.
+
+        NOTE: currently UNUSED and NOT SAFE with this fork. It accepts the new
+        obj_id (by caching the current frame's features and briefly clearing
+        `tracking_has_started`), but the next `track()` crashes because past
+        memory frames hold fewer object pointers:
+            RuntimeError: stack expects each tensor to be equal size ...
+        Supporting this requires padding historical memory frames. See
+        notes/future_ideas.md ("Incremental object add"). Kept as the basis for a
+        future fork patch.
+        """
+        if not self._prompted:
+            raise RuntimeError("Tracker not prompted: call prompt_first_frame first")
+
+        predictor = self.predictor
+        frame_idx = int(predictor.frame_idx)
+
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+            prepared, _, _ = predictor.perpare_data(frame, image_size=predictor.image_size)
+            image = prepared.cuda().float().unsqueeze(0)
+            backbone_out = predictor.forward_image(image)
+            predictor.condition_state["cached_features"] = {
+                frame_idx: (image, backbone_out)
+            }
+            predictor.condition_state["tracking_has_started"] = False
+            obj_id = self._next_obj_id()
+            predictor.add_new_prompt(
+                frame_idx=frame_idx,
+                obj_id=int(obj_id),
+                bbox=np.asarray([bbox], dtype=np.float32),
+            )
+
+        return obj_id
+
     # ------------------------------------------------------------ propagation
     def propagate(self, frame: np.ndarray) -> sv.Detections:
         if not self._prompted:
@@ -126,3 +166,81 @@ class SAM2Tracker:
 
     def reset(self) -> None:
         self._prompted = False
+
+
+class RepromptPolicy:
+    """Decide when to re-seed SAM2 as more players become visible.
+
+    `grow_on_new_max`: re-prompt when the cleaned detected-player count reaches a
+    NEW maximum above the count at the last prompt, sustained for
+    `debounce_frames` and respecting `min_frames_between_reprompts` (and capped
+    by `max_tracks`). This avoids thrash from merge/split flicker: a count that
+    has already triggered (or that drops back) does not re-trigger.
+
+    Other policies (`mismatch`, `full_scene`, `never`) are documented in
+    notes/future_ideas.md; only `grow_on_new_max` is implemented here.
+    """
+
+    def __init__(self, cfg: dict) -> None:
+        sam2_cfg = cfg["sam2"]
+        self.policy = sam2_cfg.get("reprompt_policy", "never")
+        self.debounce_frames = int(sam2_cfg.get("debounce_frames", 3))
+        self.min_frames_between_reprompts = int(
+            sam2_cfg.get("min_frames_between_reprompts", 15)
+        )
+        self.max_tracks = int(sam2_cfg.get("max_tracks", 12))
+        self.reset_state(seeded_n=0, index=0)
+
+    def reset_state(self, seeded_n: int, index: int) -> None:
+        self.best_n = int(seeded_n)
+        self.last_prompt_index = int(index)
+        self._pending_value: int | None = None
+        self._pending_streak = 0
+
+    def should_reprompt(self, index: int, n_det: int) -> bool:
+        """Pure decision (no state commit): has the count reached a debounced new max?"""
+        if self.policy != "grow_on_new_max":
+            return False
+
+        n_det = int(n_det)
+        if n_det <= self.best_n or n_det > self.max_tracks:
+            self._pending_value = None
+            self._pending_streak = 0
+            return False
+
+        if n_det == self._pending_value:
+            self._pending_streak += 1
+        else:
+            self._pending_value = n_det
+            self._pending_streak = 1
+
+        return (
+            self._pending_streak >= self.debounce_frames
+            and (index - self.last_prompt_index) >= self.min_frames_between_reprompts
+        )
+
+    def commit(self, index: int, n_det: int) -> None:
+        """Record that a re-prompt actually happened at this count."""
+        self.best_n = int(n_det)
+        self.last_prompt_index = int(index)
+        self._pending_value = None
+        self._pending_streak = 0
+
+
+def tracks_all_matched(
+    track_boxes: np.ndarray, det_boxes: np.ndarray, match_iou: float
+) -> bool:
+    """True if every track box overlaps some detection box with IoU >= match_iou.
+
+    Used as a safety guard before a reset-based re-prompt: if any track is not
+    re-detectable (e.g. occluded but still tracked well by SAM2), the reset is
+    vetoed so that track is not lost.
+    """
+    track_boxes = np.asarray(track_boxes)
+    det_boxes = np.asarray(det_boxes)
+    if track_boxes.size == 0:
+        return True
+    if det_boxes.size == 0:
+        return False
+    ious = sv.box_iou_batch(track_boxes, det_boxes)
+    return bool((ious.max(axis=1) >= match_iou).all())
