@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .env
 artifacts/
+data/
+outputs/
+*.mp4
+AGENTS.md

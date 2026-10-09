@@ -73,12 +73,13 @@ class Detector:
         return filters
 
     # --------------------------------------------------------------- inference
-    def detect_raw(self, frame: np.ndarray) -> sv.Detections:
+    def detect_raw(self, frame: np.ndarray, class_agnostic_nms: bool | None = None) -> sv.Detections:
+        agnostic = self.class_agnostic_nms if class_agnostic_nms is None else bool(class_agnostic_nms)
         result = self.model.infer(
             frame,
             confidence=self.confidence,
             iou_threshold=self.iou_threshold,
-            class_agnostic_nms=self.class_agnostic_nms,
+            class_agnostic_nms=agnostic,
         )[0]
         return sv.Detections.from_inference(result)
 

@@ -31,6 +31,7 @@ class TeamBrick:
 
         self.classifier = TeamClassifier(device=self.device, batch_size=self.batch_size)
         self.track_validator = ConsecutiveValueTracker(n_consecutive=1)
+        self._track_team: dict[int, int] = {}
 
         self.fitted = False
         self.fit_frame: Optional[int] = None
@@ -40,11 +41,32 @@ class TeamBrick:
         self._offline_crops: list[np.ndarray] = []
 
     # ------------------------------------------------------------------ crops
-    def crops_from_detections(self, frame: np.ndarray, detections: sv.Detections) -> list[np.ndarray]:
+    def crops_with_indices(
+        self, frame: np.ndarray, detections: sv.Detections, min_size: int = 4
+    ) -> tuple[list[np.ndarray], list[int]]:
+        """Return (valid crops, detection indices). Skips degenerate/empty boxes."""
         if detections is None or len(detections) == 0:
-            return []
+            return [], []
         boxes = sv.scale_boxes(xyxy=detections.xyxy, factor=self.scale_factor)
-        return [sv.crop_image(frame, box) for box in boxes]
+        h, w = frame.shape[:2]
+        crops: list[np.ndarray] = []
+        indices: list[int] = []
+        for i, box in enumerate(boxes):
+            x1 = max(0, int(round(float(box[0]))))
+            y1 = max(0, int(round(float(box[1]))))
+            x2 = min(w, int(round(float(box[2]))))
+            y2 = min(h, int(round(float(box[3]))))
+            if x2 - x1 < min_size or y2 - y1 < min_size:
+                continue
+            crop = frame[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+            crops.append(crop)
+            indices.append(i)
+        return crops, indices
+
+    def crops_from_detections(self, frame: np.ndarray, detections: sv.Detections) -> list[np.ndarray]:
+        return self.crops_with_indices(frame, detections)[0]
 
     # --------------------------------------------------------------- training
     def collect_offline(self, crops: list[np.ndarray]) -> None:
@@ -62,6 +84,35 @@ class TeamBrick:
         self._offline_crops = []
         return True
 
+    def fit_offline_from_videos(
+        self,
+        detector,
+        video_paths,
+        stride: int,
+        player_class_ids,
+        class_agnostic_nms: bool = True,
+        max_seconds: float = 0.0,
+    ) -> int:
+        """Notebook-style offline fit: sample crops across videos (stride) and fit once."""
+        player_class_ids = list(player_class_ids)
+        crops: list[np.ndarray] = []
+        for path in video_paths:
+            info = sv.VideoInfo.from_video_path(str(path))
+            max_frames = int(round(max_seconds * info.fps / stride)) if max_seconds else 0
+            generator = sv.get_video_frames_generator(source_path=str(path), stride=stride)
+            for i, frame in enumerate(generator):
+                if max_frames and i >= max_frames:
+                    break
+                detections = detector.detect_raw(frame, class_agnostic_nms=class_agnostic_nms)
+                players = detections[np.isin(detections.class_id, player_class_ids)]
+                crops_frame, _ = self.crops_with_indices(frame, players)
+                crops.extend(crops_frame)
+        if len(crops) >= 2:
+            self.classifier.fit(crops)
+            self.fitted = True
+            self.fit_frame = -1
+        return len(crops)
+
     # ------------------------------------------------------------------- main
     def update(
         self,
@@ -70,10 +121,14 @@ class TeamBrick:
         tracker_ids: Optional[np.ndarray] = None,
         index: int | None = None,
     ) -> Optional[np.ndarray]:
-        """Return per-detection team ids once fitted, else None (still bootstrapping)."""
-        crops = self.crops_from_detections(frame, detections)
+        """Return per-detection team ids once fitted, else None (still bootstrapping).
+
+        Unknown/unmatched detections get -1 (e.g. crop too small to classify).
+        """
+        n = len(detections) if detections is not None else 0
+        crops, idx = self.crops_with_indices(frame, detections)
         if not crops:
-            return None if not self.fitted else np.empty(0, dtype=int)
+            return None if not self.fitted else np.full(n, -1, dtype=int)
 
         if not self.fitted:
             self._buffer.extend(crops)
@@ -82,11 +137,23 @@ class TeamBrick:
                 self.fit(index)
             return None
 
-        teams = np.asarray(self.classifier.predict(crops)).astype(int)
-        if tracker_ids is not None and len(tracker_ids) == len(teams):
-            self.track_validator.update(tracker_ids=np.asarray(tracker_ids), values=teams)
-            teams = np.asarray(self.track_validator.get_validated(np.asarray(tracker_ids))).astype(int)
-        return teams
+        if tracker_ids is not None and len(np.asarray(tracker_ids)) == n:
+            tids = np.asarray(tracker_ids)
+            teams_full = np.full(n, -1, dtype=int)
+            # Predict only for tracks we have not classified yet, then cache.
+            unknown = [p for p, i in enumerate(idx) if int(tids[i]) not in self._track_team]
+            if unknown:
+                preds = np.asarray(self.classifier.predict([crops[p] for p in unknown])).astype(int)
+                for p, pred in zip(unknown, preds):
+                    self._track_team[int(tids[idx[p]])] = int(pred)
+            for p, i in enumerate(idx):
+                teams_full[i] = self._track_team[int(tids[i])]
+            return teams_full
+
+        preds = np.asarray(self.classifier.predict(crops)).astype(int)
+        teams_full = np.full(n, -1, dtype=int)
+        teams_full[idx] = preds
+        return teams_full
 
     # --------------------------------------------------------------- helpers
     def team_name(self, team_id: int) -> str:

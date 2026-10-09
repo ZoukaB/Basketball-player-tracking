@@ -1,35 +1,39 @@
 # Future ideas
 
 ## Current stable baseline (active)
+
 - Target input: continuous shot, no cuts, 10 detectable players on frame 0.
 - Seed SAM2 once from frame-0 `player` detections (referee already suppressed),
-  then propagate for the whole video. No cut detection, no re-prompting.
+then propagate for the whole video. No cut detection, no re-prompting.
 - Verified on the continuous q2 clip: 10 tracks seeded, 10 masks every frame.
 
 ## Reprompt / consistent-tracking ideas (parked)
+
 Everything we considered for keeping tracks consistent as the scene changes.
 The machinery is kept dormant in `src/tracking.py`, `src/utils.py`, and
 `src/config.yaml` for later.
 
 1. **full_scene** — if the initial seed is under N players, re-prompt when the
-   detected count reaches N. Simple but brittle when the detector merges two
+  detected count reaches N. Simple but brittle when the detector merges two
    players (count never reaches N).
 2. **grow_on_new_max (reset-based)** — re-prompt when the detected count reaches
-   a debounced new maximum above the last prompt's count. Risk: a full reset
+  a debounced new maximum above the last prompt's count. Risk: a full reset
    discards SAM2 memory and can drop an occluded player the detector can't see.
 3. **safety-guarded reset (implemented, dormant)** — grow_on_new_max but only
-   reset when *every* tracked object is matched to a detection
+  reset when *every* tracked object is matched to a detection
    (`tracks_all_matched`, IoU >= `match_iou`). If a track is unmatched (occluded
    but well-tracked), the reset is vetoed. Verified: it skipped growth at one
    frame due to an occluded track, then applied safely once all were visible.
 4. **mismatch (not implemented)** — act on detections that match no track
-   (best IoU < `match_iou`) instead of raw counts; directly targets merged/missed
+  (best IoU < `match_iou`) instead of raw counts; directly targets merged/missed
    players. See the detailed section below.
 5. **additive add without reset (blocked)** — add a new object mid-stream. The
-   fork crashes (object-count memory mismatch); needs a fork patch. See below.
+  fork crashes (object-count memory mismatch); needs a fork patch. See below.
 6. **ID reconciliation via OCR (planned)** — map sparse track IDs to true players
-   and merge IDs across any re-prompts/cuts, so ID churn from reset-based growth
+  and merge IDs across any re-prompts/cuts, so ID churn from reset-based growth
    does not matter downstream.
+
+
 
 ## Reprompt policy: detection-vs-track mismatch (precise growth)
 
@@ -38,11 +42,12 @@ RF-DETR merges two players into one box, so the count undercounts and a new
 player can enter without the count ever crossing a "new max".
 
 Mismatch policy:
+
 - After each prompt, each frame: compute IoU between cleaned `player` boxes and
-  current SAM2 track boxes (`mask_to_xyxy`, already available).
+current SAM2 track boxes (`mask_to_xyxy`, already available).
 - A detection is "unmatched" if its best IoU with any track < `match_iou` (e.g. 0.3).
 - If >= 1 unmatched confident detection persists >= `debounce_frames` (and the
-  cooldown elapsed, and track count <= `max_tracks`), re-prompt from that frame.
+cooldown elapsed, and track count <= `max_tracks`), re-prompt from that frame.
 - Directly targets the merged/missed player instead of relying on counts.
 
 Cost: `box_iou_batch` on ~10 detections x ~10 tracks = < 0.5 ms/frame
@@ -51,6 +56,7 @@ even improve by avoiding spurious re-prompts. Tradeoff is code complexity + a
 match threshold; runtime is effectively free.
 
 Config sketch:
+
 ```yaml
 sam2:
   reprompt_policy: mismatch
@@ -60,29 +66,32 @@ sam2:
   max_tracks: 12
 ```
 
+
+
 ## Incremental object add (no reset) — BLOCKED by fork
 
 The ideal is adding new objects mid-stream without resetting track IDs. Two
 findings:
 
 1. The fork forbids it by design: `_obj_id_to_idx` raises once
-   `tracking_has_started` (line ~158), `propagate_in_video_preflight` sets that
+  `tracking_has_started` (line ~158), `propagate_in_video_preflight` sets that
    flag ("we don't allow adding new objects until session is reset", line ~707),
    and `add_new_prompt_during_track(if_new_target=True)` raises
    `NotImplementedError` (line ~793).
 2. A spike that worked around the flag (cache the current frame's backbone
-   features in `cached_features`, temporarily clear `tracking_has_started`, call
+  features in `cached_features`, temporarily clear `tracking_has_started`, call
    `add_new_prompt` with a new obj_id) *added* the object fine but crashed on the
    next `track()`:
    `RuntimeError: stack expects each tensor to be equal size, but got [10,256] and [11,256]`
    in `sam2_base._prepare_memory_conditioned_features` — past memory frames were
    encoded with 10 objects, so stacking object pointers across frames fails.
-
    To make additive work you must retroactively pad every historical memory frame
    with a slot (zero `obj_ptr`, zero maskmem) for each new object — deep surgery
    in the fork's memory store / `_prepare_memory_conditioned_features`. Revisit
    only if ID churn becomes a real problem; `add_new_mask` was also considered and
    dropped for now.
+
+
 
 ## Current approach: safety-guarded reset (implemented)
 
@@ -95,17 +104,19 @@ was occluded, then applied safely once all players were visible. Default
 `reprompt_policy` is `never` as a safety net; enable via
 `tests/test_tracking.py --reprompt-policy grow_on_new_max` while it's validated.
 
-
 ## Team label stabilization (cluster index -> team name)
 
 `sports.TeamClassifier` (SigLIP + UMAP + KMeans) returns arbitrary cluster
 indices, and UMAP may vary between runs, so `teams.team_names` (0/1) can be
 flipped or unstable. Options to stabilize:
+
 - Decide the mapping from cluster appearance (e.g. dominant jersey colour:
-  green vs blue) instead of a fixed index.
+green vs blue) instead of a fixed index.
 - Persist the fitted classifier + the chosen index->name mapping per game.
 - Seed UMAP (random_state) and verify via the per-cluster sample montage
-  produced by tests/test_teams.py.
+produced by tests/test_teams.py.
+
+
 
 ## Speed (deprioritized)
 
@@ -116,6 +127,10 @@ objects, GPU ONNX (`onnxruntime-gpu` / `inference-gpu`).
 
 ## Re-ID / players entering after the first frame
 
-Accepted limitation for now: players entering after frame 0 get a track only via
-a re-prompt (cut or `grow_on_new_max`). OCR is planned to map sparse track IDs to
+Accepted limitation for now: players entering after frame 0 get a track only via  
+a re-prompt (cut or `grow_on_new_max`). OCR is planned to map sparse track IDs to  
 true players, which also helps reconcile IDs across re-prompts.
+
+## Better 2D homography mapping
+
+Use skeleton keypoints on feet for better pixel to court position accuracy. 

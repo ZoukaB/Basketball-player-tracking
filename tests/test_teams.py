@@ -102,11 +102,14 @@ def main() -> None:
         if teams_ids is None:
             continue
 
-        crops = teams.crops_from_detections(frame, players)
-        for team_id, crop in zip(teams_ids, crops):
-            class_counts[int(team_id)] = class_counts.get(int(team_id), 0) + 1
-            samples.setdefault(int(team_id), []).append(crop)
-        predicted += len(teams_ids)
+        crops, indices = teams.crops_with_indices(frame, players)
+        for i, crop in zip(indices, crops):
+            team_id = int(teams_ids[i])
+            if team_id < 0:
+                continue
+            class_counts[team_id] = class_counts.get(team_id, 0) + 1
+            samples.setdefault(team_id, []).append(crop)
+        predicted += int((np.asarray(teams_ids) >= 0).sum())
 
         if index % 10 == 0:
             print(f"  analysis {index:4d}: {len(players)} dets -> team counts so far {class_counts}")

@@ -141,7 +141,11 @@ def main() -> None:
         annotated = vertex_annotator.annotate(scene=annotated, key_points=kpts)
 
         for i in range(len(frame_xy)):
-            color = palette[int(team_ids[i])].as_bgr() if team_ids is not None else (0, 255, 255)
+            if team_ids is not None:
+                t = int(team_ids[i])
+                color = palette[t if t >= 0 else 0].as_bgr()
+            else:
+                color = (0, 255, 255)
             center = tuple(np.round(frame_xy[i]).astype(int))
             cv2.circle(annotated, center, 12, color, -1)
             cv2.circle(annotated, center, 12, (0, 0, 0), 2)
