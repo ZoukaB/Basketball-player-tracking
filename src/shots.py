@@ -21,6 +21,17 @@ from sports.basketball import (
     draw_made_and_miss_on_court,
 )
 
+LEFT_BASKET = (5.25, 25.0)
+RIGHT_BASKET = (88.75, 25.0)
+
+
+def basket_side(court_x: float) -> str:
+    return "left" if court_x < 47.0 else "right"
+
+
+def basket_xy(side: str) -> tuple[float, float]:
+    return LEFT_BASKET if side == "left" else RIGHT_BASKET
+
 
 class ShotBrick:
     def __init__(self, cfg: dict, analysis_fps: float) -> None:
@@ -37,7 +48,15 @@ class ShotBrick:
         self.layup_dunk_id = int(classes["player_layup_dunk"])
         self.shot_class_ids = {self.jump_shot_id, self.layup_dunk_id}
 
+        # Offense guard: the team with the player-in-possession is on offense, and
+        # only the offense may shoot (one basket per possession).
+        self.enforce_offense_team = bool(scfg.get("enforce_offense_team", True))
+        self.possession_class_id = int(scfg.get("possession_class_id", 4))
+        self.current_offense_team: Optional[int] = None
+        self.current_basket: Optional[str] = None
+
         self.shots: list[dict] = []
+        self.dropped: list[dict] = []
         self._pending: Optional[dict] = None
 
     # ------------------------------------------------------------------- main
@@ -51,6 +70,8 @@ class ShotBrick:
         tracker_ids: Optional[np.ndarray] = None,
     ) -> list:
         """Feed one analysis frame; returns ShotEventRecord list."""
+        self._update_offense(frame, index, detections, transformer, team_brick)
+
         has_jump = bool(np.any(detections.class_id == self.jump_shot_id)) if len(detections) else False
         has_layup = bool(np.any(detections.class_id == self.layup_dunk_id)) if len(detections) else False
         has_basket = bool(np.any(detections.class_id == self.ball_in_basket_id)) if len(detections) else False
@@ -67,13 +88,39 @@ class ShotBrick:
 
         return events
 
+    def _update_offense(self, frame, index, detections, transformer, team_brick) -> None:
+        """Track the current offense team from the player-in-possession detection."""
+        if team_brick is None or detections is None or len(detections) == 0:
+            return
+        poss = detections[detections.class_id == self.possession_class_id]
+        if len(poss) == 0:
+            return
+
+        teams = team_brick.update(frame, poss, index=index)
+        if teams is not None and len(teams) == len(poss):
+            if poss.confidence is not None:
+                best = int(np.argmax(poss.confidence))
+            else:
+                best = 0
+            if int(teams[best]) >= 0:
+                self.current_offense_team = int(teams[best])
+
+        if transformer is not None:
+            point = poss.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)
+            court_xy = np.asarray(transformer.transform_points(points=np.asarray(point)))
+            if len(court_xy):
+                j = int(np.argmax(poss.confidence)) if poss.confidence is not None else 0
+                self.current_basket = basket_side(float(court_xy[j, 0]))
+
     # --------------------------------------------------------------- internal
     def _capture_shooter(
         self, frame, index, shot_type, detections, transformer, team_brick, tracker_ids
     ) -> dict:
         class_id = self.jump_shot_id if shot_type == "JUMP" else self.layup_dunk_id
         pending = {"start_frame": index, "type": shot_type, "court_x": None, "court_y": None,
-                   "team": None, "tracker_id": None}
+                   "team": None, "tracker_id": None,
+                   "offense_team": self.current_offense_team,
+                   "attacking_basket": self.current_basket}
         subset = detections[np.isin(detections.class_id, [class_id])]
         if len(subset) == 0:
             subset = detections[np.isin(detections.class_id, list(self.shot_class_ids))]
@@ -103,7 +150,9 @@ class ShotBrick:
 
     def _finalize(self, index: int, event) -> None:
         record = dict(self._pending or {"start_frame": None, "type": event["type"],
-                                        "court_x": None, "court_y": None, "team": None, "tracker_id": None})
+                                        "court_x": None, "court_y": None, "team": None,
+                                        "tracker_id": None, "offense_team": None,
+                                        "attacking_basket": None})
         record.update(
             {
                 "frame": index,
@@ -112,7 +161,33 @@ class ShotBrick:
                 "type": event["type"],
             }
         )
-        self.shots.append(record)
+        shot_basket = basket_side(record["court_x"]) if record["court_x"] is not None else None
+        record["shot_basket"] = shot_basket
+
+        reason = None
+        if self.enforce_offense_team:
+            if (
+                record.get("team") is not None
+                and record.get("offense_team") is not None
+                and record["team"] != record["offense_team"]
+            ):
+                reason = "team_mismatch"
+            elif (
+                record.get("attacking_basket") is not None
+                and shot_basket is not None
+                and shot_basket != record["attacking_basket"]
+            ):
+                reason = "basket_mismatch"
+
+        if reason is not None:
+            record["drop_reason"] = reason
+            self.dropped.append(record)
+            print(f"  [SHOT-DROP] frame={index} {record['outcome']} {record['type']} reason={reason} "
+                  f"shooter_team={record.get('team')} offense_team={record.get('offense_team')} "
+                  f"shot_basket={shot_basket} attacking_basket={record.get('attacking_basket')}")
+        else:
+            self.shots.append(record)
+
         if event["event"] in {"MADE", "MISSED"}:
             self._pending = None
 

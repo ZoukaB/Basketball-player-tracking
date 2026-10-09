@@ -155,6 +155,11 @@ shots:
   reset_time_frames_s: 1.7
   min_frames_between_starts_s: 0.5
   cooldown_frames_after_made_s: 0.5
+  # Offense guard: only the team with the player-in-possession may shoot, and at
+  # most one team attacks a given basket per possession.
+  enforce_offense_team: true
+  possession_class_id: 4
+  offense_lookback_frames: 15
 
 ocr:
   enabled: false

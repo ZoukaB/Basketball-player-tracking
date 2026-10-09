@@ -24,7 +24,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.detection import Detector  # noqa: E402
 from src.keypoints import KeypointBrick  # noqa: E402
-from src.shots import ShotBrick  # noqa: E402
+from src.shots import ShotBrick, basket_xy  # noqa: E402
 from src.teams import TeamBrick  # noqa: E402
 from src.utils import analysis_stride, load_config, resolve_path, setup_env  # noqa: E402
 
@@ -89,6 +89,7 @@ def main() -> None:
     print(f"Team fit: {n_crops} crops, fitted={teams.fitted}")
 
     rows: list[dict] = []
+    dropped_count = 0
     for video_path in videos:
         info = sv.VideoInfo.from_video_path(str(video_path))
         stride = analysis_stride(cfg, info.fps)
@@ -112,14 +113,40 @@ def main() -> None:
                 transformer = keypoints.transformer_from(kpts, mask)
             shots.update(frame, index, detections, transformer=transformer, team_brick=teams)
 
+        dropped_count += len(shots.dropped)
+
+        # Clip-level consistency: one possession -> one offense team / one basket.
+        offenses = [s["offense_team"] for s in shots.shots if s.get("offense_team") is not None]
+        clip_offense = max(set(offenses), key=offenses.count) if offenses else None
+        baskets = [s.get("attacking_basket") for s in shots.shots if s.get("attacking_basket")]
+        clip_basket = max(set(baskets), key=baskets.count) if baskets else None
+
+        kept = 0
         for shot in shots.shots:
+            team_id = shot.get("team")
+            offense_id = shot.get("offense_team")
+            attacking = shot.get("attacking_basket")
+            if clip_offense is not None and team_id is not None and team_id != clip_offense:
+                dropped_count += 1
+                print(f"  [CLIP-DROP] {video_path.name} f{shot['frame']} reason=clip_team_mismatch "
+                      f"team={team_id} clip_offense={clip_offense}")
+                continue
+            if clip_basket is not None and attacking is not None and attacking != clip_basket:
+                dropped_count += 1
+                print(f"  [CLIP-DROP] {video_path.name} f{shot['frame']} reason=clip_basket_mismatch "
+                      f"basket={attacking} clip_basket={clip_basket}")
+                continue
+
             cx, cy = shot.get("court_x"), shot.get("court_y")
             if cx is None:
                 distance = None
+            elif attacking is not None:
+                bx, by = basket_xy(attacking)
+                distance = float(np.hypot(cx - bx, cy - by))
             else:
                 bx, by = basket_for(cx)
                 distance = float(np.hypot(cx - bx, cy - by))
-            team_id = shot.get("team")
+
             rows.append(
                 {
                     "video": video_path.name,
@@ -127,13 +154,16 @@ def main() -> None:
                     "shot_type": shot.get("type", ""),
                     "result": shot.get("outcome", ""),
                     "team": teams.team_name(team_id) if team_id is not None else "",
+                    "offense_team": teams.team_name(offense_id) if offense_id is not None else "",
+                    "attacking_basket": attacking or "",
                     "court_x": "" if cx is None else round(cx, 2),
                     "court_y": "" if cy is None else round(cy, 2),
                     "distance_ft": "" if distance is None else round(distance, 2),
                     "player_id": "",
                 }
             )
-        print(f"  {video_path.name}: {len(shots.shots)} shots")
+            kept += 1
+        print(f"  {video_path.name}: kept {kept}, dropped {len(shots.dropped)} (clip_offense={clip_offense}, clip_basket={clip_basket})")
 
     out_dir = resolve_path(args.out_dir) if args.out_dir else resolve_path(cfg["output"]["dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -141,7 +171,8 @@ def main() -> None:
     with open(shots_csv, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["video", "frame", "shot_type", "result", "team", "court_x", "court_y", "distance_ft", "player_id"],
+            fieldnames=["video", "frame", "shot_type", "result", "team", "offense_team",
+                        "attacking_basket", "court_x", "court_y", "distance_ft", "player_id"],
         )
         writer.writeheader()
         writer.writerows(rows)
@@ -180,10 +211,11 @@ def main() -> None:
 
     print("\n--- summary ---")
     print(f"Videos: {len(videos)}")
-    print(f"Shots total: {len(rows)}")
+    print(f"Shots kept: {len(rows)}  (dropped total: {dropped_count})")
     for r in rows:
         print(f"  {r['video']} f{r['frame']} {r['shot_type']} {r['result']} "
-              f"team={r['team'] or '?'} loc=({r['court_x']},{r['court_y']}) dist={r['distance_ft']}")
+              f"team={r['team'] or '?'} offense={r['offense_team'] or '?'} "
+              f"basket={r['attacking_basket'] or '?'} loc=({r['court_x']},{r['court_y']}) dist={r['distance_ft']}")
     print(f"Wrote {shots_csv}")
     print(f"Wrote {shot_map}")
 
