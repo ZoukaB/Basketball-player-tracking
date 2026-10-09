@@ -46,7 +46,46 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fit-stride", type=int, default=30, help="Stride for the team fit")
     p.add_argument("--out-dir", default=None, help="Write shots.csv + shot_map.png here")
     p.add_argument("--videos", default="", help="Comma-separated name substrings to select specific videos")
+    p.add_argument("--dedup-window-s", type=float, default=0.5, help="Duplicate window in seconds")
+    p.add_argument("--dedup-dist-ft", type=float, default=5.0, help="Duplicate court distance in feet")
     return p.parse_args()
+
+
+def _is_duplicate(a: dict, b: dict, window_frames: int, dist_ft: float) -> bool:
+    if abs(int(a["frame"]) - int(b["frame"])) > window_frames:
+        return False
+    ax, ay = a.get("court_x"), a.get("court_y")
+    bx, by = b.get("court_x"), b.get("court_y")
+    if ax is None or ay is None or bx is None or by is None:
+        return True  # time-only fallback
+    return float(np.hypot(ax - bx, ay - by)) <= dist_ft
+
+
+def dedup_clip_shots(shots: list[dict], window_frames: int, dist_ft: float):
+    """Group near-simultaneous shots; keep one per group (prefer offense team, then made)."""
+    groups: list[list[dict]] = []
+    for shot in sorted(shots, key=lambda s: int(s["frame"])):
+        for group in groups:
+            if any(_is_duplicate(shot, other, window_frames, dist_ft) for other in group):
+                group.append(shot)
+                break
+        else:
+            groups.append([shot])
+
+    def priority(shot: dict):
+        offense = shot.get("offense_team")
+        team = shot.get("team")
+        off_match = 1 if (offense is not None and team is not None and team == offense) else 0
+        made = 1 if shot.get("made") else 0
+        return (off_match, made, -int(shot["frame"]))
+
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    for group in groups:
+        best = max(group, key=priority)
+        kept.append(best)
+        dropped.extend([s for s in group if s is not best])
+    return kept, dropped
 
 
 def list_videos(video_dir: str | Path, limit: int | None) -> list[Path]:
@@ -113,30 +152,19 @@ def main() -> None:
                 transformer = keypoints.transformer_from(kpts, mask)
             shots.update(frame, index, detections, transformer=transformer, team_brick=teams)
 
-        dropped_count += len(shots.dropped)
+        # De-duplicate: drop only near-simultaneous events (same shot detected twice).
+        window_frames = max(1, int(round(analysis_fps * args.dedup_window_s)))
+        kept_shots, dropped_shots = dedup_clip_shots(shots.shots, window_frames, args.dedup_dist_ft)
+        dropped_count += len(dropped_shots)
+        for shot in dropped_shots:
+            print(f"  [DEDUP-DROP] {video_path.name} f{shot['frame']} {shot['outcome']} "
+                  f"{shot['type']} loc=({shot.get('court_x')},{shot.get('court_y')}) "
+                  f"team={shot.get('team')} offense={shot.get('offense_team')}")
 
-        # Clip-level consistency: one possession -> one offense team / one basket.
-        offenses = [s["offense_team"] for s in shots.shots if s.get("offense_team") is not None]
-        clip_offense = max(set(offenses), key=offenses.count) if offenses else None
-        baskets = [s.get("attacking_basket") for s in shots.shots if s.get("attacking_basket")]
-        clip_basket = max(set(baskets), key=baskets.count) if baskets else None
-
-        kept = 0
-        for shot in shots.shots:
+        for shot in kept_shots:
             team_id = shot.get("team")
             offense_id = shot.get("offense_team")
             attacking = shot.get("attacking_basket")
-            if clip_offense is not None and team_id is not None and team_id != clip_offense:
-                dropped_count += 1
-                print(f"  [CLIP-DROP] {video_path.name} f{shot['frame']} reason=clip_team_mismatch "
-                      f"team={team_id} clip_offense={clip_offense}")
-                continue
-            if clip_basket is not None and attacking is not None and attacking != clip_basket:
-                dropped_count += 1
-                print(f"  [CLIP-DROP] {video_path.name} f{shot['frame']} reason=clip_basket_mismatch "
-                      f"basket={attacking} clip_basket={clip_basket}")
-                continue
-
             cx, cy = shot.get("court_x"), shot.get("court_y")
             if cx is None:
                 distance = None
@@ -162,8 +190,7 @@ def main() -> None:
                     "player_id": "",
                 }
             )
-            kept += 1
-        print(f"  {video_path.name}: kept {kept}, dropped {len(shots.dropped)} (clip_offense={clip_offense}, clip_basket={clip_basket})")
+        print(f"  {video_path.name}: kept {len(kept_shots)}, deduped {len(dropped_shots)}")
 
     out_dir = resolve_path(args.out_dir) if args.out_dir else resolve_path(cfg["output"]["dir"])
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -163,30 +163,7 @@ class ShotBrick:
         )
         shot_basket = basket_side(record["court_x"]) if record["court_x"] is not None else None
         record["shot_basket"] = shot_basket
-
-        reason = None
-        if self.enforce_offense_team:
-            if (
-                record.get("team") is not None
-                and record.get("offense_team") is not None
-                and record["team"] != record["offense_team"]
-            ):
-                reason = "team_mismatch"
-            elif (
-                record.get("attacking_basket") is not None
-                and shot_basket is not None
-                and shot_basket != record["attacking_basket"]
-            ):
-                reason = "basket_mismatch"
-
-        if reason is not None:
-            record["drop_reason"] = reason
-            self.dropped.append(record)
-            print(f"  [SHOT-DROP] frame={index} {record['outcome']} {record['type']} reason={reason} "
-                  f"shooter_team={record.get('team')} offense_team={record.get('offense_team')} "
-                  f"shot_basket={shot_basket} attacking_basket={record.get('attacking_basket')}")
-        else:
-            self.shots.append(record)
+        self.shots.append(record)
 
         if event["event"] in {"MADE", "MISSED"}:
             self._pending = None
