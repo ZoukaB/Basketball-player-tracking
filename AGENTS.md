@@ -57,3 +57,4 @@ Prefer plain functions and small classes over abstractions. No frameworks, no as
 - If a notebook cell depends on Colab-specific features (secrets, `!pip`, inline display), replace it with
   a local equivalent and say what changed.
 - Do not add features outside the current scope, even if they seem useful. Propose them instead.
+
