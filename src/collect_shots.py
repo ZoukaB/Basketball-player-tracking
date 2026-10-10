@@ -24,8 +24,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.detection import Detector  # noqa: E402
 from src.keypoints import KeypointBrick  # noqa: E402
-from src.shots import ShotBrick, basket_xy  # noqa: E402
-from src.teams import TeamBrick  # noqa: E402
+from src.ocr import OCRBrick  # noqa: E402
+from src.shots import ShotBrick, basket_xy, dedup_clip_shots  # noqa: E402
+from src.teams import TeamBrick, resolve_team_mapping  # noqa: E402
 from src.utils import analysis_stride, load_config, resolve_path, setup_env  # noqa: E402
 
 import cv2  # noqa: E402
@@ -48,44 +49,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--videos", default="", help="Comma-separated name substrings to select specific videos")
     p.add_argument("--dedup-window-s", type=float, default=0.5, help="Duplicate window in seconds")
     p.add_argument("--dedup-dist-ft", type=float, default=5.0, help="Duplicate court distance in feet")
+    p.add_argument("--ocr", action="store_true", help="Read jersey numbers to identify the shooter")
+    p.add_argument("--ask-teams", action="store_true", help="Prompt to validate cluster->team mapping")
+    p.add_argument("--auto-map-color", action="store_true", help="Auto-map clusters by jersey colour")
+    p.add_argument("--team-mapping", default="outputs/team_mapping.json", help="Mapping file to load/save")
     return p.parse_args()
-
-
-def _is_duplicate(a: dict, b: dict, window_frames: int, dist_ft: float) -> bool:
-    if abs(int(a["frame"]) - int(b["frame"])) > window_frames:
-        return False
-    ax, ay = a.get("court_x"), a.get("court_y")
-    bx, by = b.get("court_x"), b.get("court_y")
-    if ax is None or ay is None or bx is None or by is None:
-        return True  # time-only fallback
-    return float(np.hypot(ax - bx, ay - by)) <= dist_ft
-
-
-def dedup_clip_shots(shots: list[dict], window_frames: int, dist_ft: float):
-    """Group near-simultaneous shots; keep one per group (prefer offense team, then made)."""
-    groups: list[list[dict]] = []
-    for shot in sorted(shots, key=lambda s: int(s["frame"])):
-        for group in groups:
-            if any(_is_duplicate(shot, other, window_frames, dist_ft) for other in group):
-                group.append(shot)
-                break
-        else:
-            groups.append([shot])
-
-    def priority(shot: dict):
-        offense = shot.get("offense_team")
-        team = shot.get("team")
-        off_match = 1 if (offense is not None and team is not None and team == offense) else 0
-        made = 1 if shot.get("made") else 0
-        return (off_match, made, -int(shot["frame"]))
-
-    kept: list[dict] = []
-    dropped: list[dict] = []
-    for group in groups:
-        best = max(group, key=priority)
-        kept.append(best)
-        dropped.extend([s for s in group if s is not best])
-    return kept, dropped
 
 
 def list_videos(video_dir: str | Path, limit: int | None) -> list[Path]:
@@ -102,6 +70,8 @@ def main() -> None:
     args = parse_args()
     setup_env()
     cfg = load_config()
+    if args.ocr:
+        cfg["ocr"]["enabled"] = True
 
     video_dir = args.video_dir or cfg["input"]["video_dir"]
     videos = list_videos(video_dir, args.limit)
@@ -110,12 +80,17 @@ def main() -> None:
         videos = [p for p in videos if any(s in p.name for s in subs)]
     assert videos, f"No videos found in {video_dir}"
 
+    out_dir = resolve_path(args.out_dir) if args.out_dir else resolve_path(cfg["output"]["dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     detector = Detector(cfg)
     teams = TeamBrick(cfg)
     keypoints = KeypointBrick(cfg)
+    ocr = OCRBrick(cfg)
 
     print(f"Video dir: {video_dir}")
     print(f"Selected {len(videos)} videos (smallest first): {[v.name for v in videos]}")
+    print(f"OCR enabled: {ocr.enabled}")
 
     n_crops = teams.fit_offline_from_videos(
         detector,
@@ -127,6 +102,14 @@ def main() -> None:
     )
     print(f"Team fit: {n_crops} crops, fitted={teams.fitted}")
 
+    resolve_team_mapping(
+        teams,
+        montage_path=out_dir / "team_clusters.jpg",
+        mapping_path=resolve_path(args.team_mapping) if args.team_mapping else None,
+        ask=args.ask_teams,
+        auto_color=args.auto_map_color,
+    )
+
     rows: list[dict] = []
     dropped_count = 0
     for video_path in videos:
@@ -135,6 +118,7 @@ def main() -> None:
         analysis_fps = info.fps / stride
         shots = ShotBrick(cfg, analysis_fps=analysis_fps)
         max_frames = int(round(args.max_seconds * info.fps / stride)) if args.max_seconds else 0
+        numbers_by_frame: dict[int, list] = {}
 
         generator = sv.get_video_frames_generator(source_path=str(video_path), stride=stride)
         transformer = None
@@ -150,6 +134,12 @@ def main() -> None:
             if shot_relevant or transformer is None:
                 kpts, mask = keypoints.landmarks(frame)
                 transformer = keypoints.transformer_from(kpts, mask)
+            # OCR number reads on shot frames (no SAM2 needed).
+            if shot_relevant and ocr.enabled:
+                number_dets = detections[detections.class_id == ocr.number_class_id]
+                reads = ocr.read_number_boxes(frame, number_dets)
+                if reads:
+                    numbers_by_frame[index] = reads
             shots.update(frame, index, detections, transformer=transformer, team_brick=teams)
 
         # De-duplicate: drop only near-simultaneous events (same shot detected twice).
@@ -175,6 +165,14 @@ def main() -> None:
                 bx, by = basket_for(cx)
                 distance = float(np.hypot(cx - bx, cy - by))
 
+            # Shooter number from OCR (matched to the shooter box).
+            start_index = shot.get("start_frame", shot.get("frame"))
+            reads = numbers_by_frame.get(start_index) or numbers_by_frame.get(shot.get("frame"))
+            number = ocr.match_number(shot.get("shooter_box"), reads) if reads else None
+            identity_team = team_id if team_id is not None else offense_id
+            name = ocr.resolve_name(identity_team, number) if number else None
+            player_id = f"{number} {name}" if (number and name) else (str(number) if number else "")
+
             rows.append(
                 {
                     "video": video_path.name,
@@ -182,24 +180,24 @@ def main() -> None:
                     "shot_type": shot.get("type", ""),
                     "result": shot.get("outcome", ""),
                     "team": teams.team_name(team_id) if team_id is not None else "",
+                    "number": number or "",
                     "offense_team": teams.team_name(offense_id) if offense_id is not None else "",
                     "attacking_basket": attacking or "",
                     "court_x": "" if cx is None else round(cx, 2),
                     "court_y": "" if cy is None else round(cy, 2),
                     "distance_ft": "" if distance is None else round(distance, 2),
-                    "player_id": "",
+                    "player_id": player_id,
                 }
             )
         print(f"  {video_path.name}: kept {len(kept_shots)}, deduped {len(dropped_shots)}")
 
-    out_dir = resolve_path(args.out_dir) if args.out_dir else resolve_path(cfg["output"]["dir"])
-    out_dir.mkdir(parents=True, exist_ok=True)
     shots_csv = out_dir / "shots.csv"
     with open(shots_csv, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["video", "frame", "shot_type", "result", "team", "offense_team",
-                        "attacking_basket", "court_x", "court_y", "distance_ft", "player_id"],
+            fieldnames=["video", "frame", "shot_type", "result", "team", "number",
+                        "offense_team", "attacking_basket", "court_x", "court_y",
+                        "distance_ft", "player_id"],
         )
         writer.writeheader()
         writer.writerows(rows)
@@ -234,6 +232,20 @@ def main() -> None:
             court=court,
         )
     shot_map = out_dir / "shot_map.png"
+
+    # Overlay shooter identifier (number / name) next to each shot.
+    SCALE, PADDING = 20, 50
+    for r in rows:
+        if r["court_x"] == "" or not (r["number"] or r["player_id"]):
+            continue
+        px = int(round(float(r["court_x"]) * SCALE + PADDING))
+        py = int(round(float(r["court_y"]) * SCALE + PADDING))
+        text = str(r["number"] or r["player_id"])
+        cv2.putText(court, text, (px + 6, py - 6), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(court, text, (px + 6, py - 6), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
     cv2.imwrite(str(shot_map), court)
 
     print("\n--- summary ---")

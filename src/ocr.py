@@ -151,6 +151,48 @@ class OCRBrick:
         return dict(self.validated_numbers)
 
     # ------------------------------------------------------------------ output
+    def read_number_boxes(self, frame: np.ndarray, number_detections: sv.Detections):
+        """OCR number boxes (no SAM2 needed). Returns list of (xyxy, number)."""
+        if not self.enabled or number_detections is None or len(number_detections) == 0:
+            return []
+        height, width = frame.shape[:2]
+        boxes = []
+        for box in number_detections.xyxy:
+            bw = float(box[2] - box[0])
+            bh = float(box[3] - box[1])
+            if min(bw, bh) >= self.min_number_size_px:
+                boxes.append(box)
+        if not boxes:
+            return []
+        boxes = np.asarray(boxes, dtype=np.float32)
+        padded = sv.clip_boxes(
+            sv.pad_boxes(xyxy=boxes, px=self.pad_px, py=self.pad_px), (width, height)
+        )
+        reads = []
+        for box, pbox in zip(boxes, padded):
+            crop = sv.crop_image(frame, pbox)
+            number = self.model.infer(crop, prompt=self.prompt)[0].response.strip()
+            reads.append((box, number))
+        return reads
+
+    @staticmethod
+    def match_number(shooter_box, number_reads, min_ratio: float = 0.5):
+        """Return the number whose box lies mostly inside `shooter_box`."""
+        if shooter_box is None or not number_reads:
+            return None
+        sx1, sy1, sx2, sy2 = (float(v) for v in shooter_box)
+        best, best_ratio = None, 0.0
+        for nbox, number in number_reads:
+            nx1, ny1, nx2, ny2 = (float(v) for v in nbox)
+            ix1, iy1 = max(sx1, nx1), max(sy1, ny1)
+            ix2, iy2 = min(sx2, nx2), min(sy2, ny2)
+            inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+            area = max(1e-6, (nx2 - nx1) * (ny2 - ny1))
+            ratio = inter / area
+            if ratio > best_ratio:
+                best, best_ratio = number, ratio
+        return best if best_ratio >= min_ratio else None
+
     def resolve_name(self, team_id: Optional[int], number: Optional[str]) -> Optional[str]:
         if team_id is None or number is None:
             return None

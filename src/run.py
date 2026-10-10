@@ -28,7 +28,7 @@ from src.detection import Detector
 from src.keypoints import KeypointBrick
 from src.ocr import OCRBrick
 from src.shots import ShotBrick
-from src.teams import TeamBrick
+from src.teams import TeamBrick, resolve_team_mapping
 from src.tracking import SAM2Tracker
 from src.utils import analysis_stride, load_config, resolve_path, setup_env
 
@@ -256,13 +256,46 @@ def run_video(video_path, cfg: dict, outputs: Optional[dict] = None, shared: Opt
 
 
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run the pipeline on the config input video")
+    parser.add_argument("--ocr", action="store_true", help="Enable OCR")
+    parser.add_argument("--ask-teams", action="store_true", help="Prompt to validate cluster->team mapping")
+    parser.add_argument("--auto-map-color", action="store_true", help="Auto-map clusters by jersey colour")
+    parser.add_argument("--team-mapping", default="outputs/team_mapping.json", help="Mapping file to load/save")
+    args = parser.parse_args()
+
     setup_env()
     cfg = load_config()
+    if args.ocr:
+        cfg["ocr"]["enabled"] = True
 
     video_path = resolve_path(cfg["input"]["video"])
     out_cfg = cfg["output"]
     out_dir = resolve_path(out_cfg["dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build components once, fit teams offline on this video, validate the mapping.
+    detector = Detector(cfg)
+    keypoints = KeypointBrick(cfg)
+    tracker = SAM2Tracker(cfg)
+    teams = TeamBrick(cfg)
+    ocr = OCRBrick(cfg)
+    teams.fit_offline_from_videos(
+        detector,
+        [video_path],
+        stride=int(cfg["teams"].get("stride", 30)),
+        player_class_ids=cfg["classes"]["player_ids"],
+        class_agnostic_nms=True,
+    )
+    resolve_team_mapping(
+        teams,
+        montage_path=out_dir / "team_clusters.jpg",
+        mapping_path=resolve_path(args.team_mapping) if args.team_mapping else None,
+        ask=args.ask_teams,
+        auto_color=args.auto_map_color,
+    )
+    shared = {"detector": detector, "keypoints": keypoints, "tracker": tracker, "teams": teams, "ocr": ocr}
 
     outputs = {
         "annotated_video": str(resolve_path(out_cfg["annotated_video"])) if cfg["render"].get("annotated_video", True) else None,
@@ -270,7 +303,7 @@ def main() -> None:
         "shots_json": str(resolve_path(out_cfg["shots_json"])),
         "shot_map": str(resolve_path(out_cfg["shot_map"])),
     }
-    shots = run_video(video_path, cfg, outputs)
+    shots = run_video(video_path, cfg, outputs, shared=shared)
 
     print("\n--- summary ---")
     print(f"Shots recorded: {len(shots)}")

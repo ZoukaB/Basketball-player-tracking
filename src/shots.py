@@ -166,7 +166,7 @@ class ShotBrick:
     def _capture_shooter(self, frame, index, shot_type, detections, transformer, team_brick, tracked) -> dict:
         class_id = self.jump_shot_id if shot_type == "JUMP" else self.layup_dunk_id
         pending = {"start_frame": index, "type": shot_type, "court_x": None, "court_y": None,
-                   "team": None, "tracker_id": None,
+                   "team": None, "tracker_id": None, "shooter_box": None,
                    "offense_team": self.current_offense_team,
                    "attacking_basket": self.current_basket}
         subset = detections[np.isin(detections.class_id, [class_id])]
@@ -176,6 +176,7 @@ class ShotBrick:
             return pending
 
         best = int(np.argmax(subset.confidence)) if subset.confidence is not None else 0
+        pending["shooter_box"] = [float(v) for v in subset.xyxy[best]]
 
         if transformer is not None:
             point = subset.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)[best : best + 1]
@@ -200,7 +201,7 @@ class ShotBrick:
         record = dict(self._pending or {"start_frame": None, "type": event["type"],
                                         "court_x": None, "court_y": None, "team": None,
                                         "tracker_id": None, "offense_team": None,
-                                        "attacking_basket": None})
+                                        "shooter_box": None, "attacking_basket": None})
         record.update(
             {
                 "frame": index,

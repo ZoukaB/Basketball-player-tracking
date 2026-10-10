@@ -65,6 +65,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fit-seconds", type=float, default=0.0, help="Cap per video for the team fit (0 = full)")
     p.add_argument("--dedup-window-s", type=float, default=0.5, help="Duplicate window in seconds")
     p.add_argument("--dedup-dist-ft", type=float, default=5.0, help="Duplicate court distance in feet")
+    p.add_argument("--ask-teams", action="store_true", help="Prompt to validate cluster->team mapping")
+    p.add_argument("--auto-map-color", action="store_true", help="Auto-map clusters by jersey colour")
+    p.add_argument("--team-mapping", default="outputs/team_mapping.json", help="Mapping file to load/save")
     return p.parse_args()
 
 
@@ -111,6 +114,14 @@ def main() -> None:
         max_seconds=args.fit_seconds,
     )
     print(f"Team fit: {n_crops} crops, fitted={teams.fitted}")
+
+    resolve_team_mapping(
+        teams,
+        montage_path=Path(args.shots_csv).parent / "team_clusters.jpg",
+        mapping_path=resolve_path(args.team_mapping) if args.team_mapping else None,
+        ask=args.ask_teams,
+        auto_color=args.auto_map_color,
+    )
 
     rows: list[dict] = []
     dropped_total = 0
