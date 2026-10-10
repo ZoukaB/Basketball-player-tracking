@@ -1,13 +1,12 @@
-"""Main pipeline: read the video once, run the bricks, write outputs.
+"""Main pipeline: read a video once, run the bricks, optionally write outputs.
 
 Stable baseline: continuous shot, seed SAM2 once from the first frame, then
 track. No cut handling / re-prompting (kept dormant). OCR is disabled by default.
 
-Outputs (paths from config):
-    outputs/annotated.mp4   masks/boxes colored by team, track IDs, court keypoints
-    outputs/tracks.csv      frame, track_id, team, x1,y1,x2,y2, court_x, court_y
-    outputs/shots.json
-    outputs/shot_map.png
+`run_video(video_path, cfg, outputs)` returns the shot records and only writes
+the outputs that are present in the `outputs` dict:
+    {"annotated_video", "tracks_csv", "shots_json", "shot_map"} -> path strings.
+Pass `outputs=None` to run without writing anything.
 """
 from __future__ import annotations
 
@@ -15,6 +14,7 @@ import csv
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -34,41 +34,49 @@ from src.utils import analysis_stride, load_config, resolve_path, setup_env
 
 import supervision as sv
 
-SCALE, PADDING = 20, 50
+TRACK_FIELDS = ["frame", "track_id", "team", "x1", "y1", "x2", "y2", "court_x", "court_y"]
 
 
-def main() -> None:
-    setup_env()
-    cfg = load_config()
+def run_video(video_path, cfg: dict, outputs: Optional[dict] = None, shared: Optional[dict] = None) -> list[dict]:
+    """Run the full pipeline on one video; return the list of shot records.
 
-    video_path = resolve_path(cfg["input"]["video"])
+    If `shared` is given, its pre-built components are reused (models loaded once
+    across clips); per-clip state (team track votes, OCR validator) is reset here.
+    """
+    video_path = Path(video_path)
     assert video_path.exists(), f"Missing video: {video_path}"
-    out_cfg = cfg["output"]
-    out_dir = resolve_path(out_cfg["dir"])
-    out_dir.mkdir(parents=True, exist_ok=True)
-    annotated_path = resolve_path(out_cfg["annotated_video"])
-    tracks_path = resolve_path(out_cfg["tracks_csv"])
-    shots_path = resolve_path(out_cfg["shots_json"])
-    shot_map_path = resolve_path(out_cfg["shot_map"])
-    render_video = bool(cfg["render"].get("annotated_video", True))
-    render_keypoints = bool(cfg["render"].get("court_keypoints", True))
 
     info = sv.VideoInfo.from_video_path(str(video_path))
     stride = analysis_stride(cfg, info.fps)
     analysis_fps = info.fps / stride
 
-    print(f"Video: {video_path}")
+    render_video = bool(outputs and outputs.get("annotated_video"))
+    render_keypoints = bool(cfg["render"].get("court_keypoints", True))
+
+    print(f"Video: {video_path.name}")
     print(f"  {info.width}x{info.height} @ {info.fps:.1f} fps, stride={stride} (analysis {analysis_fps:.1f} fps)")
 
-    detector = Detector(cfg)
-    tracker = SAM2Tracker(cfg)
-    teams = TeamBrick(cfg)
-    keypoints = KeypointBrick(cfg)
+    if shared:
+        detector = shared["detector"]
+        tracker = shared["tracker"]
+        teams = shared["teams"]
+        keypoints = shared["keypoints"]
+        ocr = shared["ocr"]
+    else:
+        detector = Detector(cfg)
+        tracker = SAM2Tracker(cfg)
+        teams = TeamBrick(cfg)
+        keypoints = KeypointBrick(cfg)
+        ocr = OCRBrick(cfg)
+
+    # Reset per-clip state so reused components do not leak across clips.
+    teams.reset_tracks()
+    if hasattr(ocr, "reset"):
+        ocr.reset()
+
     shots = ShotBrick(cfg, analysis_fps=analysis_fps)
-    ocr = OCRBrick(cfg)
     print(f"  OCR enabled: {ocr.enabled}")
 
-    # Team colors, one per cluster index (order = cfg teams.team_colors order).
     hex_colors = list(cfg["teams"]["team_colors"].values())
     team_palette = sv.ColorPalette.from_hex(hex_colors)
     mask_annotator = sv.MaskAnnotator(color=team_palette, opacity=0.5, color_lookup=sv.ColorLookup.INDEX)
@@ -87,8 +95,11 @@ def main() -> None:
     identity: dict[int, dict] = {}
     team_by_tid: dict[int, int] = {}
 
-    sink = sv.VideoSink(str(annotated_path), video_info) if render_video else None
-    if sink is not None:
+    sink = None
+    if render_video:
+        out_path = Path(outputs["annotated_video"])
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        sink = sv.VideoSink(str(out_path), video_info)
         sink.__enter__()
 
     try:
@@ -146,10 +157,10 @@ def main() -> None:
                 transformer=transformer,
                 team_brick=teams,
                 tracker_ids=tracked.tracker_id,
+                tracked=tracked,
             )
             timings["shots"].append((time.perf_counter() - t0) * 1000)
 
-            # --- tracks rows + court coords ---
             tracker_ids = np.asarray(tracked.tracker_id) if tracked.tracker_id is not None else np.array([])
             court_xy = (
                 keypoints.transform_points(transformer, tracked.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER))
@@ -172,7 +183,6 @@ def main() -> None:
                     }
                 )
 
-            # --- annotated video ---
             if sink is not None and len(tracked):
                 color_idx = (
                     np.asarray(frame_teams)
@@ -207,32 +217,52 @@ def main() -> None:
         if sink is not None:
             sink.__exit__(None, None, None)
 
-    shots.to_json(shots_path)
-    court = shots.draw_shot_map(keypoints.config, cfg["teams"])
-    cv2.imwrite(str(shot_map_path), court)
+    if outputs:
+        if outputs.get("shots_json"):
+            shots.to_json(outputs["shots_json"])
+        if outputs.get("shot_map"):
+            path = Path(outputs["shot_map"])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(path), shots.draw_shot_map(keypoints.config, cfg["teams"]))
+        if outputs.get("tracks_csv"):
+            path = Path(outputs["tracks_csv"])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=TRACK_FIELDS)
+                writer.writeheader()
+                writer.writerows(track_rows)
 
-    with open(tracks_path, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=["frame", "track_id", "team", "x1", "y1", "x2", "y2", "court_x", "court_y"],
-        )
-        writer.writeheader()
-        writer.writerows(track_rows)
+    print(f"  shots recorded: {len(shots.shots)}")
+    if timings["detect"]:
+        mean_ms = {k: float(np.mean(v)) for k, v in timings.items() if v}
+        print("  ms/frame:", {k: round(v, 1) for k, v in mean_ms.items()})
+    return shots.shots
+
+
+def main() -> None:
+    setup_env()
+    cfg = load_config()
+
+    video_path = resolve_path(cfg["input"]["video"])
+    out_cfg = cfg["output"]
+    out_dir = resolve_path(out_cfg["dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    outputs = {
+        "annotated_video": str(resolve_path(out_cfg["annotated_video"])) if cfg["render"].get("annotated_video", True) else None,
+        "tracks_csv": str(resolve_path(out_cfg["tracks_csv"])),
+        "shots_json": str(resolve_path(out_cfg["shots_json"])),
+        "shot_map": str(resolve_path(out_cfg["shot_map"])),
+    }
+    shots = run_video(video_path, cfg, outputs)
 
     print("\n--- summary ---")
-    print(f"Frames processed: {len(timings['detect'])}")
-    print(f"Tracks rows: {len(track_rows)}")
-    print(f"Shots recorded: {len(shots.shots)}")
-    print("Per-brick ms/frame (mean):")
-    for name, values in timings.items():
-        if values:
-            print(f"  {name:9s}: {np.mean(values):8.2f}  (n={len(values)})")
+    print(f"Shots recorded: {len(shots)}")
     if torch.cuda.is_available():
         print(f"Peak VRAM: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
-    print(f"Wrote {annotated_path if render_video else '(annotated video disabled)'}")
-    print(f"Wrote {tracks_path}")
-    print(f"Wrote {shots_path}")
-    print(f"Wrote {shot_map_path}")
+    for key, path in outputs.items():
+        if path:
+            print(f"Wrote {key}: {path}")
 
 
 if __name__ == "__main__":

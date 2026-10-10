@@ -69,6 +69,12 @@ class OCRBrick:
     def should_run(self, index: int) -> bool:
         return self.enabled and (index % self.stride_frames == 0)
 
+    def reset(self) -> None:
+        """Reset per-clip OCR state (validator + validated numbers)."""
+        if self.validator is not None:
+            self.validator.reset_all()
+        self.validated_numbers = {}
+
     # --------------------------------------------------------------------- main
     def update(
         self,

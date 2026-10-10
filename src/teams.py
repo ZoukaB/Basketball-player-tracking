@@ -31,6 +31,8 @@ class TeamBrick:
 
         self.classifier = TeamClassifier(device=self.device, batch_size=self.batch_size)
         self.track_validator = ConsecutiveValueTracker(n_consecutive=1)
+        self.team_votes_target = int(tcfg.get("team_votes_target", 5))
+        self._track_votes: dict[int, dict[int, int]] = {}
         self._track_team: dict[int, int] = {}
 
         self.fitted = False
@@ -140,14 +142,22 @@ class TeamBrick:
         if tracker_ids is not None and len(np.asarray(tracker_ids)) == n:
             tids = np.asarray(tracker_ids)
             teams_full = np.full(n, -1, dtype=int)
-            # Predict only for tracks we have not classified yet, then cache.
-            unknown = [p for p, i in enumerate(idx) if int(tids[i]) not in self._track_team]
-            if unknown:
-                preds = np.asarray(self.classifier.predict([crops[p] for p in unknown])).astype(int)
-                for p, pred in zip(unknown, preds):
-                    self._track_team[int(tids[idx[p]])] = int(pred)
+            # Predict each track up to `team_votes_target` times, then lock the majority.
+            need = [
+                p for p, i in enumerate(idx)
+                if sum(self._track_votes.get(int(tids[i]), {}).values()) < self.team_votes_target
+            ]
+            if need:
+                preds = np.asarray(self.classifier.predict([crops[p] for p in need])).astype(int)
+                for p, pred in zip(need, preds):
+                    votes = self._track_votes.setdefault(int(tids[idx[p]]), {})
+                    votes[int(pred)] = votes.get(int(pred), 0) + 1
             for p, i in enumerate(idx):
-                teams_full[i] = self._track_team[int(tids[i])]
+                votes = self._track_votes.get(int(tids[i]))
+                if votes:
+                    team = max(votes, key=votes.get)
+                    self._track_team[int(tids[i])] = int(team)
+                    teams_full[i] = int(team)
             return teams_full
 
         preds = np.asarray(self.classifier.predict(crops)).astype(int)
@@ -156,6 +166,15 @@ class TeamBrick:
         return teams_full
 
     # --------------------------------------------------------------- helpers
+    def team_of(self, tracker_id: int) -> Optional[int]:
+        """Majority team for a SAM2 track id, or None if unseen."""
+        return self._track_team.get(int(tracker_id))
+
+    def reset_tracks(self) -> None:
+        """Clear per-clip track team/vote state (call between clips)."""
+        self._track_votes.clear()
+        self._track_team.clear()
+
     def team_name(self, team_id: int) -> str:
         return self.team_names.get(int(team_id), f"team{team_id}")
 
