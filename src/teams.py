@@ -9,8 +9,13 @@ from the first frames, fits once when a trigger fires, then only predicts.
 """
 from __future__ import annotations
 
+import json
+import random
+import sys
+from pathlib import Path
 from typing import Optional
 
+import cv2
 import numpy as np
 import supervision as sv
 from sports import ConsecutiveValueTracker, TeamClassifier
@@ -41,6 +46,8 @@ class TeamBrick:
         self._buffer_frames = 0
         # Optional pre-collected crops (offline_stride mode).
         self._offline_crops: list[np.ndarray] = []
+        # Small retained subset used to preview clusters and suggest the mapping.
+        self._probe_crops: list[np.ndarray] = []
 
     # ------------------------------------------------------------------ crops
     def crops_with_indices(
@@ -109,6 +116,8 @@ class TeamBrick:
                 players = detections[np.isin(detections.class_id, player_class_ids)]
                 crops_frame, _ = self.crops_with_indices(frame, players)
                 crops.extend(crops_frame)
+        if crops:
+            self._probe_crops = random.sample(crops, min(len(crops), 400))
         if len(crops) >= 2:
             self.classifier.fit(crops)
             self.fitted = True
@@ -175,8 +184,124 @@ class TeamBrick:
         self._track_votes.clear()
         self._track_team.clear()
 
+    # ---------------------------------------------------- cluster validation
+    def _cluster_labels(self, crops: list[np.ndarray]) -> np.ndarray:
+        if not crops:
+            return np.array([], dtype=int)
+        return np.asarray(self.classifier.predict(crops)).astype(int)
+
+    def cluster_sizes(self) -> dict[int, int]:
+        labels = self._cluster_labels(self._probe_crops)
+        return {int(c): int((labels == c).sum()) for c in sorted(set(labels.tolist()))}
+
+    def cluster_montage(self, per_cluster: int = 12, path=None,
+                        crop_w: int = 72, crop_h: int = 144) -> np.ndarray:
+        """One row of sample crops per cluster; saves to `path` when given."""
+        labels = self._cluster_labels(self._probe_crops)
+        clusters = sorted(set(labels.tolist())) if labels.size else []
+        rows = []
+        for cid in clusters:
+            idxs = np.where(labels == cid)[0][:per_cluster]
+            cells = [cv2.resize(self._probe_crops[i], (crop_w, crop_h)) for i in idxs]
+            while len(cells) < per_cluster:
+                cells.append(np.zeros((crop_h, crop_w, 3), np.uint8))
+            rows.append(np.hstack(cells))
+        image = np.vstack(rows) if rows else np.zeros((crop_h, crop_w * per_cluster, 3), np.uint8)
+        if path:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(path), image)
+        return image
+
+    def cluster_mean_color(self) -> dict[int, tuple[float, float, float]]:
+        """Mean central-region colour (BGR) per cluster, from probe crops."""
+        labels = self._cluster_labels(self._probe_crops)
+        out: dict[int, tuple[float, float, float]] = {}
+        for cid in (sorted(set(labels.tolist())) if labels.size else []):
+            means = []
+            for i in np.where(labels == cid)[0]:
+                crop = self._probe_crops[i]
+                h, w = crop.shape[:2]
+                centre = crop[h // 4:max(h // 4 + 1, 3 * h // 4), w // 4:max(w // 4 + 1, 3 * w // 4)]
+                if centre.size:
+                    means.append(centre.reshape(-1, 3).mean(axis=0))
+            if means:
+                out[int(cid)] = tuple(float(v) for v in np.mean(means, axis=0))
+        return out
+
+    @staticmethod
+    def _hex_to_rgb(hex_color: str) -> np.ndarray:
+        h = hex_color.lstrip("#")
+        return np.array([int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)], dtype=float)
+
+    def suggest_mapping(self) -> dict[int, str]:
+        """Suggest cluster -> team name by nearest jersey colour (2-team assignment)."""
+        clusters = sorted(self.team_names.keys())
+        colours = self.cluster_mean_color()
+        if len(clusters) != 2 or len(colours) != 2:
+            return dict(self.team_names)
+        names = [self.team_names[c] for c in clusters]
+        refs = [self._hex_to_rgb(self.team_colors.get(n, "#ffffff")) for n in names]
+        means = {c: np.array(colours[c][::-1], dtype=float) for c in clusters}  # BGR -> RGB
+        d = np.array([[np.linalg.norm(means[c] - refs[j]) for j in range(2)] for c in clusters])
+        if d[0, 0] + d[1, 1] <= d[0, 1] + d[1, 0]:
+            return {clusters[0]: names[0], clusters[1]: names[1]}
+        return {clusters[0]: names[1], clusters[1]: names[0]}
+
+    def set_mapping(self, mapping: dict) -> None:
+        self.team_names = {int(k): v for k, v in mapping.items()}
+
+    def mapping_summary(self) -> dict[int, str]:
+        return dict(self.team_names)
+
     def team_name(self, team_id: int) -> str:
         return self.team_names.get(int(team_id), f"team{team_id}")
 
     def team_color_hex(self, team_id: int) -> str:
         return self.team_colors.get(self.team_name(team_id), "#ffffff")
+
+
+def resolve_team_mapping(
+    teams: "TeamBrick",
+    montage_path: str | Path | None,
+    mapping_path: str | Path | None,
+    ask: bool,
+    auto_color: bool,
+    log=print,
+) -> dict:
+    """Show cluster samples, suggest/validate the cluster->team mapping, persist it."""
+    if not teams.fitted or not teams._probe_crops:
+        return teams.mapping_summary()
+
+    teams.cluster_montage(path=montage_path)
+    sizes = teams.cluster_sizes()
+    suggest = teams.suggest_mapping()
+    log(f"Team cluster samples -> {montage_path}")
+    log(f"  cluster sizes: {sizes}")
+    log(f"  suggested mapping: {suggest}")
+
+    mapping = None
+    mp = Path(mapping_path) if mapping_path else None
+    if mp and mp.exists():
+        try:
+            mapping = {int(k): v for k, v in json.loads(mp.read_text(encoding="utf-8")).items()}
+            log(f"  loaded mapping from {mp}: {mapping}")
+        except Exception:
+            mapping = None
+    if mapping is None:
+        mapping = dict(suggest)
+
+    if ask and sys.stdin is not None and sys.stdin.isatty():
+        for cid in sorted(mapping.keys()):
+            default = mapping.get(cid, "")
+            response = input(f"  Team for cluster {cid} [{default}]: ").strip()
+            if response:
+                mapping[cid] = response
+    elif auto_color:
+        mapping = dict(suggest)
+
+    teams.set_mapping(mapping)
+    if mp:
+        mp.parent.mkdir(parents=True, exist_ok=True)
+        mp.write_text(json.dumps({str(k): v for k, v in mapping.items()}, indent=2), encoding="utf-8")
+    log(f"  applied mapping: {teams.mapping_summary()}")
+    return teams.mapping_summary()

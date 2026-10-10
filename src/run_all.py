@@ -28,7 +28,7 @@ from src.keypoints import KeypointBrick  # noqa: E402
 from src.ocr import OCRBrick  # noqa: E402
 from src.run import run_video  # noqa: E402
 from src.shots import basket_side, basket_xy, dedup_clip_shots  # noqa: E402
-from src.teams import TeamBrick  # noqa: E402
+from src.teams import TeamBrick, resolve_team_mapping  # noqa: E402
 from src.tracking import SAM2Tracker  # noqa: E402
 from src.utils import analysis_stride, load_config, resolve_path, setup_env  # noqa: E402
 
