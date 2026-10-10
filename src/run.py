@@ -34,7 +34,7 @@ from src.utils import analysis_stride, load_config, resolve_path, setup_env
 
 import supervision as sv
 
-TRACK_FIELDS = ["frame", "track_id", "team", "x1", "y1", "x2", "y2", "court_x", "court_y"]
+TRACK_FIELDS = ["frame", "track_id", "team", "number", "x1", "y1", "x2", "y2", "court_x", "court_y"]
 
 
 def run_video(video_path, cfg: dict, outputs: Optional[dict] = None, shared: Optional[dict] = None) -> list[dict]:
@@ -216,6 +216,22 @@ def run_video(video_path, cfg: dict, outputs: Optional[dict] = None, shared: Opt
     finally:
         if sink is not None:
             sink.__exit__(None, None, None)
+
+    # Fill jersey numbers (OCR, per track) now that identity is complete.
+    for row in track_rows:
+        row["number"] = identity.get(int(row["track_id"]), {}).get("number", "")
+    for shot in shots.shots:
+        tid = shot.get("tracker_id")
+        if tid is not None:
+            info = identity.get(int(tid), {})
+            number = info.get("number")
+            if number:
+                name = ocr.resolve_name(info.get("team"), number)
+                shot["player_id"] = f"{number} {name}" if name else str(number)
+            else:
+                shot["player_id"] = ""
+        else:
+            shot["player_id"] = ""
 
     if outputs:
         if outputs.get("shots_json"):

@@ -161,7 +161,7 @@ def main() -> None:
                     "court_x": "" if cx is None else round(cx, 2),
                     "court_y": "" if cy is None else round(cy, 2),
                     "distance_ft": "" if distance is None else round(distance, 2),
-                    "player_id": "",
+                    "player_id": shot.get("player_id", ""),
                 }
             )
         print(f"  {video_path.name}: kept {len(kept)}, deduped {len(dropped)}")
