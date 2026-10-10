@@ -5,6 +5,8 @@ has_jump_shot / has_layup_dunk / has_ball_in_basket), 87/89 (jump-shot class +
 draw_made_and_miss_on_court).
 
 Shot location = the shooter's bottom-center projected onto the court.
+When SAM2 tracking is available (`tracked`), the shooter/offense team is read
+from the player's track (majority team), otherwise it falls back to per-crop.
 Timings are built from the *analysis* fps so the windows stay in seconds.
 """
 from __future__ import annotations
@@ -23,6 +25,7 @@ from sports.basketball import (
 
 LEFT_BASKET = (5.25, 25.0)
 RIGHT_BASKET = (88.75, 25.0)
+MATCH_IOU = 0.3
 
 
 def basket_side(court_x: float) -> str:
@@ -31,6 +34,43 @@ def basket_side(court_x: float) -> str:
 
 def basket_xy(side: str) -> tuple[float, float]:
     return LEFT_BASKET if side == "left" else RIGHT_BASKET
+
+
+def _is_duplicate(a: dict, b: dict, window_frames: int, dist_ft: float) -> bool:
+    if abs(int(a["frame"]) - int(b["frame"])) > window_frames:
+        return False
+    ax, ay = a.get("court_x"), a.get("court_y")
+    bx, by = b.get("court_x"), b.get("court_y")
+    if ax is None or ay is None or bx is None or by is None:
+        return True  # time-only fallback
+    return float(np.hypot(ax - bx, ay - by)) <= dist_ft
+
+
+def dedup_clip_shots(shots: list[dict], window_frames: int, dist_ft: float):
+    """Group near-simultaneous shots; keep one per group (prefer offense team, then made)."""
+    groups: list[list[dict]] = []
+    for shot in sorted(shots, key=lambda s: int(s["frame"])):
+        for group in groups:
+            if any(_is_duplicate(shot, other, window_frames, dist_ft) for other in group):
+                group.append(shot)
+                break
+        else:
+            groups.append([shot])
+
+    def priority(shot: dict):
+        offense = shot.get("offense_team")
+        team = shot.get("team")
+        off_match = 1 if (offense is not None and team is not None and team == offense) else 0
+        made = 1 if shot.get("made") else 0
+        return (off_match, made, -int(shot["frame"]))
+
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    for group in groups:
+        best = max(group, key=priority)
+        kept.append(best)
+        dropped.extend([s for s in group if s is not best])
+    return kept, dropped
 
 
 class ShotBrick:
@@ -48,15 +88,12 @@ class ShotBrick:
         self.layup_dunk_id = int(classes["player_layup_dunk"])
         self.shot_class_ids = {self.jump_shot_id, self.layup_dunk_id}
 
-        # Offense guard: the team with the player-in-possession is on offense, and
-        # only the offense may shoot (one basket per possession).
         self.enforce_offense_team = bool(scfg.get("enforce_offense_team", True))
         self.possession_class_id = int(scfg.get("possession_class_id", 4))
         self.current_offense_team: Optional[int] = None
         self.current_basket: Optional[str] = None
 
         self.shots: list[dict] = []
-        self.dropped: list[dict] = []
         self._pending: Optional[dict] = None
 
     # ------------------------------------------------------------------- main
@@ -68,9 +105,10 @@ class ShotBrick:
         transformer=None,
         team_brick=None,
         tracker_ids: Optional[np.ndarray] = None,
+        tracked: Optional[sv.Detections] = None,
     ) -> list:
         """Feed one analysis frame; returns ShotEventRecord list."""
-        self._update_offense(frame, index, detections, transformer, team_brick)
+        self._update_offense(frame, index, detections, transformer, team_brick, tracked)
 
         has_jump = bool(np.any(detections.class_id == self.jump_shot_id)) if len(detections) else False
         has_layup = bool(np.any(detections.class_id == self.layup_dunk_id)) if len(detections) else False
@@ -81,14 +119,27 @@ class ShotBrick:
         for event in events:
             if event["event"] == "START":
                 self._pending = self._capture_shooter(
-                    frame, index, event["type"], detections, transformer, team_brick, tracker_ids
+                    frame, index, event["type"], detections, transformer, team_brick, tracked
                 )
             else:
                 self._finalize(index, event)
 
         return events
 
-    def _update_offense(self, frame, index, detections, transformer, team_brick) -> None:
+    # ------------------------------------------------------- track helpers
+    @staticmethod
+    def _team_from_track(team_brick, tracked, box: np.ndarray):
+        """Return (tracker_id, team_id) of the tracked player best matching `box`."""
+        if team_brick is None or tracked is None or len(tracked) == 0 or tracked.tracker_id is None:
+            return None, None
+        ious = sv.box_iou_batch(tracked.xyxy, np.asarray(box, dtype=np.float32)[None, :]).reshape(-1)
+        best = int(np.argmax(ious))
+        if ious[best] < MATCH_IOU:
+            return None, None
+        tid = int(tracked.tracker_id[best])
+        return tid, team_brick.team_of(tid)
+
+    def _update_offense(self, frame, index, detections, transformer, team_brick, tracked) -> None:
         """Track the current offense team from the player-in-possession detection."""
         if team_brick is None or detections is None or len(detections) == 0:
             return
@@ -96,26 +147,23 @@ class ShotBrick:
         if len(poss) == 0:
             return
 
-        teams = team_brick.update(frame, poss, index=index)
-        if teams is not None and len(teams) == len(poss):
-            if poss.confidence is not None:
-                best = int(np.argmax(poss.confidence))
-            else:
-                best = 0
-            if int(teams[best]) >= 0:
-                self.current_offense_team = int(teams[best])
+        best = int(np.argmax(poss.confidence)) if poss.confidence is not None else 0
+        _, team = self._team_from_track(team_brick, tracked, poss.xyxy[best])
+        if team is None:
+            teams = team_brick.update(frame, poss, index=index)
+            if teams is not None and len(teams) == len(poss) and int(teams[best]) >= 0:
+                team = int(teams[best])
+        if team is not None:
+            self.current_offense_team = int(team)
 
         if transformer is not None:
             point = poss.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)
             court_xy = np.asarray(transformer.transform_points(points=np.asarray(point)))
             if len(court_xy):
-                j = int(np.argmax(poss.confidence)) if poss.confidence is not None else 0
-                self.current_basket = basket_side(float(court_xy[j, 0]))
+                self.current_basket = basket_side(float(court_xy[best, 0]))
 
     # --------------------------------------------------------------- internal
-    def _capture_shooter(
-        self, frame, index, shot_type, detections, transformer, team_brick, tracker_ids
-    ) -> dict:
+    def _capture_shooter(self, frame, index, shot_type, detections, transformer, team_brick, tracked) -> dict:
         class_id = self.jump_shot_id if shot_type == "JUMP" else self.layup_dunk_id
         pending = {"start_frame": index, "type": shot_type, "court_x": None, "court_y": None,
                    "team": None, "tracker_id": None,
@@ -135,13 +183,13 @@ class ShotBrick:
             pending["court_x"] = float(court_xy[0, 0])
             pending["court_y"] = float(court_xy[0, 1])
 
-        if tracker_ids is not None and len(tracker_ids) == len(detections):
-            ious = sv.box_iou_batch(detections.xyxy, subset.xyxy[best : best + 1]).reshape(-1)
-            match = int(np.argmax(ious))
-            if ious[match] >= 0.3:
-                pending["tracker_id"] = int(tracker_ids[match])
-
-        if team_brick is not None:
+        # Prefer team from the shooter's SAM2 track.
+        tid, team = self._team_from_track(team_brick, tracked, subset.xyxy[best])
+        if tid is not None:
+            pending["tracker_id"] = tid
+        if team is not None:
+            pending["team"] = int(team)
+        elif team_brick is not None:
             teams = team_brick.update(frame, subset, index=index)
             if teams is not None and len(teams) > best and int(teams[best]) >= 0:
                 pending["team"] = int(teams[best])
@@ -161,8 +209,7 @@ class ShotBrick:
                 "type": event["type"],
             }
         )
-        shot_basket = basket_side(record["court_x"]) if record["court_x"] is not None else None
-        record["shot_basket"] = shot_basket
+        record["shot_basket"] = basket_side(record["court_x"]) if record["court_x"] is not None else None
         self.shots.append(record)
 
         if event["event"] in {"MADE", "MISSED"}:
@@ -178,7 +225,6 @@ class ShotBrick:
     def draw_shot_map(self, config, teams_cfg: dict) -> np.ndarray:
         """Half/full court with made (o) / missed (x) per team."""
         court = draw_court(config=config)
-        team_names = list(teams_cfg.get("team_names", {}).values())
         team_colors = list(teams_cfg.get("team_colors", {}).values())
         for team_id, hex_color in enumerate(team_colors):
             made = np.array([[s["court_x"], s["court_y"]] for s in self.shots

@@ -104,6 +104,8 @@ teams:
   min_crops: 300
   min_track_ids: 10
   max_bootstrap_frames: 60
+  # Team is decided per SAM2 track by majority over this many crops.
+  team_votes_target: 5
   team_names:
     0: Boston Celtics
     1: New York Knicks
