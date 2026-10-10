@@ -2,7 +2,7 @@
 # Single input clip per run (edited broadcast: one possession per file).
 
 input:
-  video: data/boston-celtics-new-york-knicks-game-1-q2-10.36-10.32.mp4
+  video: data/boston-celtics-new-york-knicks-game-1-q1-01.54-01.48.mp4
   video_dir: C:/Users/zecab/Desktop/Sport_Cv/Videos/source/boston-celtics-new-york-knicks-game-1
 
 output:
