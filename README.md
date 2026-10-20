@@ -6,7 +6,7 @@ Computer-vision pipeline for NBA broadcast footage: player / ball / rim detectio
 
 <p align="center">
   <img src="assets/demo.gif" alt="Tracking demo" width="40%">
-  <img src="assets/shot_map.png" alt="Shot map" width="40%">
+  <img src="assets/shot_map.gif" alt="Shot map" width="40%">
 </p>
 
 ## Pipeline
