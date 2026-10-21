@@ -9,6 +9,14 @@ import numpy as np
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+VIDEO_EXTS = {".mp4", ".avi", ".mov"}
+
+
+def list_videos(video_dir: str | Path, limit: int | None) -> list[Path]:
+    """Video files in `video_dir`, smallest first, optionally capped to `limit`."""
+    files = [p for p in Path(video_dir).iterdir() if p.suffix.lower() in VIDEO_EXTS]
+    files.sort(key=lambda p: p.stat().st_size)
+    return files[:limit] if limit else files
 
 
 def setup_env() -> None:

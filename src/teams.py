@@ -86,6 +86,8 @@ class TeamBrick:
         crops = self._offline_crops if self.fit_mode == "offline_stride" else self._buffer
         if len(crops) < 2:
             return False
+        # Keep a small subset so suggest_mapping / resolve_team_mapping also work here.
+        self._probe_crops = random.sample(crops, min(len(crops), 400))
         self.classifier.fit(crops)
         self.fitted = True
         self.fit_frame = index

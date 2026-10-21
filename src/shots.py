@@ -36,6 +36,25 @@ def basket_xy(side: str) -> tuple[float, float]:
     return LEFT_BASKET if side == "left" else RIGHT_BASKET
 
 
+def shot_distance(shot: dict) -> Optional[float]:
+    """Feet from the shot location to the attacked basket (nearest basket if unknown)."""
+    cx, cy = shot.get("court_x"), shot.get("court_y")
+    if cx is None or cy is None:
+        return None
+    side = shot.get("attacking_basket") or basket_side(cx)
+    bx, by = basket_xy(side)
+    return float(np.hypot(cx - bx, cy - by))
+
+
+def shot_priority(shot: dict):
+    """Dedup priority: shooter team matches offense, then made, then earliest."""
+    offense = shot.get("offense_team")
+    team = shot.get("team")
+    off_match = 1 if (offense is not None and team is not None and team == offense) else 0
+    made = 1 if shot.get("made") else 0
+    return (off_match, made, -int(shot["frame"]))
+
+
 def _is_duplicate(a: dict, b: dict, window_frames: int, dist_ft: float) -> bool:
     if abs(int(a["frame"]) - int(b["frame"])) > window_frames:
         return False
@@ -57,17 +76,10 @@ def dedup_clip_shots(shots: list[dict], window_frames: int, dist_ft: float):
         else:
             groups.append([shot])
 
-    def priority(shot: dict):
-        offense = shot.get("offense_team")
-        team = shot.get("team")
-        off_match = 1 if (offense is not None and team is not None and team == offense) else 0
-        made = 1 if shot.get("made") else 0
-        return (off_match, made, -int(shot["frame"]))
-
     kept: list[dict] = []
     dropped: list[dict] = []
     for group in groups:
-        best = max(group, key=priority)
+        best = max(group, key=shot_priority)
         kept.append(best)
         dropped.extend([s for s in group if s is not best])
     return kept, dropped

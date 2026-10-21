@@ -25,18 +25,13 @@ if str(REPO_ROOT) not in sys.path:
 from src.detection import Detector  # noqa: E402
 from src.keypoints import KeypointBrick  # noqa: E402
 from src.ocr import OCRBrick  # noqa: E402
-from src.shots import ShotBrick, basket_xy, dedup_clip_shots  # noqa: E402
+from src.shots import ShotBrick, dedup_clip_shots, shot_distance  # noqa: E402
 from src.teams import TeamBrick, resolve_team_mapping  # noqa: E402
-from src.utils import analysis_stride, load_config, resolve_path, setup_env  # noqa: E402
+from src.utils import analysis_stride, list_videos, load_config, resolve_path, setup_env  # noqa: E402
 
 import cv2  # noqa: E402
 import supervision as sv  # noqa: E402
 from sports.basketball import draw_court, draw_made_and_miss_on_court  # noqa: E402
-
-VIDEO_EXTS = {".mp4", ".avi", ".mov"}
-LEFT_BASKET = (5.25, 25.0)
-RIGHT_BASKET = (88.75, 25.0)
-
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Offline shot collection")
@@ -54,16 +49,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--auto-map-color", action="store_true", help="Auto-map clusters by jersey colour")
     p.add_argument("--team-mapping", default="outputs/team_mapping.json", help="Mapping file to load/save")
     return p.parse_args()
-
-
-def list_videos(video_dir: str | Path, limit: int | None) -> list[Path]:
-    files = [p for p in Path(video_dir).iterdir() if p.suffix.lower() in VIDEO_EXTS]
-    files.sort(key=lambda p: p.stat().st_size)
-    return files[:limit] if limit else files
-
-
-def basket_for(court_x: float) -> tuple[float, float]:
-    return LEFT_BASKET if court_x < 47.0 else RIGHT_BASKET
 
 
 def main() -> None:
@@ -156,14 +141,7 @@ def main() -> None:
             offense_id = shot.get("offense_team")
             attacking = shot.get("attacking_basket")
             cx, cy = shot.get("court_x"), shot.get("court_y")
-            if cx is None:
-                distance = None
-            elif attacking is not None:
-                bx, by = basket_xy(attacking)
-                distance = float(np.hypot(cx - bx, cy - by))
-            else:
-                bx, by = basket_for(cx)
-                distance = float(np.hypot(cx - bx, cy - by))
+            distance = shot_distance(shot)
 
             # Shooter number from OCR (matched to the shooter box).
             start_index = shot.get("start_frame", shot.get("frame"))
