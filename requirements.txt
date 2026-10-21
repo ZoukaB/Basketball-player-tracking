@@ -24,3 +24,8 @@ PyYAML==6.0.3
 python-dotenv==1.0.1
 tqdm==4.70.1
 num2words==0.5.14
+
+# Live dashboard (dashboard/app.py)
+streamlit==1.66.0
+plotly==7.1.0
+pandas==2.3.3

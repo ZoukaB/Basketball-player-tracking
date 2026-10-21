@@ -27,7 +27,8 @@ def build_shot_chart(
         "Type: %{customdata[2]}<br>"
         "Result: %{customdata[3]}<br>"
         "Distance: %{customdata[4]} ft<br>"
-        "Confidence: %{customdata[5]}"
+        "Confidence: %{customdata[5]}<br>"
+        "Clip: %{customdata[6]} · frame %{customdata[7]}"
         "<extra></extra>"
     )
 
@@ -38,6 +39,7 @@ def build_shot_chart(
             conf = row.get("confidence")
             dist_s = f"{dist:.1f}" if pd.notna(dist) else "—"
             conf_s = f"{conf:.3f}" if pd.notna(conf) else "—"
+            frame = row.get("frame")
             rows.append(
                 [
                     row.get("name") or "Unknown",
@@ -46,6 +48,8 @@ def build_shot_chart(
                     row.get("result") or "—",
                     dist_s,
                     conf_s,
+                    row.get("video") if pd.notna(row.get("video")) else "—",
+                    int(frame) if pd.notna(frame) else "—",
                 ]
             )
         return rows

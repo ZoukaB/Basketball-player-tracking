@@ -10,6 +10,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MOCK_DIR = REPO_ROOT / "outputs" / "mock_data"
 
 NORMALIZED_COLUMNS = [
+    "video",
+    "frame",
     "player_id",
     "name",
     "team",
@@ -22,6 +24,8 @@ NORMALIZED_COLUMNS = [
 ]
 
 _COLUMN_ALIASES = {
+    "video": ("video", "clip"),
+    "frame": ("frame",),
     "player_id": ("player_id", "player_Id", "playerId", "number", "tracker_id"),
     "name": ("name", "Name", "player", "player_name"),
     "team": ("team", "Team"),
@@ -29,7 +33,7 @@ _COLUMN_ALIASES = {
     "result": ("result", "Result", "outcome"),
     "x_court": ("x_court", "court_x", "x"),
     "y_court": ("y_court", "court_y", "y"),
-    "distance": ("distance", "Distance"),
+    "distance": ("distance", "Distance", "distance_ft"),
     "confidence": ("confidence", "Confidence"),
 }
 
@@ -100,6 +104,7 @@ def normalize_shots(df: pd.DataFrame) -> pd.DataFrame:
     out["y_court"] = pd.to_numeric(out["y_court"], errors="coerce")
     out["distance"] = pd.to_numeric(out["distance"], errors="coerce")
     out["confidence"] = pd.to_numeric(out["confidence"], errors="coerce")
+    out["frame"] = pd.to_numeric(out["frame"], errors="coerce")
     if "name" in out.columns:
         out["name"] = out["name"].astype("string")
     if "team" in out.columns:
@@ -111,6 +116,11 @@ def normalize_shots(df: pd.DataFrame) -> pd.DataFrame:
 
 def load_shots(path: str | Path) -> pd.DataFrame:
     return normalize_shots(pd.read_csv(path))
+
+
+def rows_to_frame(rows: list[dict]) -> pd.DataFrame:
+    """Live session rows (already on the half court: x_court/y_court) -> chart schema."""
+    return normalize_shots(pd.DataFrame(rows))
 
 
 def filter_shots(

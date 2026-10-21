@@ -1,24 +1,38 @@
-"""Shot chart dashboard."""
+"""Live shot chart dashboard.
+
+A background `LiveShotSession` (src/live.py) runs the shot pipeline over the
+video source; fragments poll it so the frame, metrics and court chart update
+while the Team / Player / Type / Result filters stay interactive.
+
+Run (from repo root):
+    .venv/Scripts/python.exe -m streamlit run dashboard/app.py
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+DASHBOARD_DIR = Path(__file__).resolve().parent
+REPO_ROOT = DASHBOARD_DIR.parent
+sys.path.insert(0, str(DASHBOARD_DIR))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(1, str(REPO_ROOT))
 
-import pandas as pd
 import streamlit as st
 
 from lib.colors import load_colors, theme_css
-from lib.data import default_shots_path, filter_shots, load_shots, shot_metrics
+from lib.data import filter_shots, rows_to_frame, shot_metrics
 from lib.shot_chart import build_shot_chart
 
+ALL_TEAMS = "All teams"
 ALL_PLAYERS = "All players"
 ALL = "All"
+SHOT_TYPES = [ALL, "2pt", "3pt", "layup"]
+RESULTS = [ALL, "Made", "Missed"]
 
 st.set_page_config(
-    page_title="Shot Chart",
+    page_title="Live Shot Chart",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -27,12 +41,24 @@ colors = load_colors()
 st.markdown(theme_css(colors), unsafe_allow_html=True)
 
 
-@st.cache_data
-def _load_default_shots() -> pd.DataFrame:
-    path = default_shots_path()
-    if path is None:
-        return pd.DataFrame()
-    return load_shots(path)
+@st.cache_resource(show_spinner=False)
+def get_session():
+    """One live session (and one set of models) per Streamlit server.
+
+    Cheap: src.live defers the heavy imports; models load in a background thread.
+    """
+    from src.live import LiveShotSession
+    from src.utils import load_config
+
+    cfg = load_config()
+    session = LiveShotSession(cfg)
+    session.preload()
+    return cfg, session
+
+
+cfg, session = get_session()
+rosters = cfg["teams"].get("rosters") or {}
+teams = sorted(rosters) or sorted(cfg["teams"]["team_names"].values())
 
 
 def _placeholder_svg() -> str:
@@ -49,101 +75,140 @@ def _on_team_change() -> None:
     st.session_state.player_choice = ALL_PLAYERS
 
 
-shots = _load_default_shots()
-if shots.empty:
-    st.error("No shots CSV found in outputs/mock_data.")
-    st.stop()
+def _player_options(team: str | None) -> list[str]:
+    """Roster names (random identities are drawn from it), plus any name seen in shots."""
+    names = set()
+    for team_name, roster in rosters.items():
+        if team is None or team_name == team:
+            names.update(roster.values())
+    rows = session.snapshot()["rows"]
+    names.update(r["name"] for r in rows if r.get("name") and (team is None or r["team"] == team))
+    return [ALL_PLAYERS, *sorted(names)]
 
-teams = sorted(shots["team"].dropna().unique().tolist())
-if "selected_team" not in st.session_state:
-    st.session_state.selected_team = teams[0]
-if st.session_state.selected_team not in teams:
-    st.session_state.selected_team = teams[0]
-if "player_choice" not in st.session_state:
-    st.session_state.player_choice = ALL_PLAYERS
 
-team_players = sorted(
-    shots.loc[shots["team"] == st.session_state.selected_team, "name"]
-    .dropna()
-    .unique()
-    .tolist()
+# ------------------------------------------------------------------ state
+st.session_state.setdefault("selected_team", ALL_TEAMS)
+st.session_state.setdefault("player_choice", ALL_PLAYERS)
+st.session_state.setdefault("shot_type_filter", ALL)
+st.session_state.setdefault("result_filter", ALL)
+st.session_state.setdefault(
+    "source", cfg["input"]["video"] if (REPO_ROOT / cfg["input"]["video"]).exists() else "data"
 )
-player_options = [ALL_PLAYERS, *team_players]
+if st.session_state.selected_team not in [ALL_TEAMS, *teams]:
+    st.session_state.selected_team = ALL_TEAMS
+
+selected_team = None if st.session_state.selected_team == ALL_TEAMS else st.session_state.selected_team
+player_options = _player_options(selected_team)
 if st.session_state.player_choice not in player_options:
     st.session_state.player_choice = ALL_PLAYERS
 
-team_col, player_col, _ = st.columns([2, 2, 5], gap="small")
+# ----------------------------------------------------------------- banner
+team_col, player_col, source_col, start_col, pause_col, stop_col = st.columns(
+    [2, 2, 4, 1, 1, 1], gap="small", vertical_alignment="center"
+)
 with team_col:
-    with st.popover("Team", width="stretch"):
+    with st.popover(f"Team: {st.session_state.selected_team}", width="stretch"):
         st.radio(
             "Team",
-            teams,
+            [ALL_TEAMS, *teams],
             key="selected_team",
             on_change=_on_team_change,
             label_visibility="collapsed",
         )
 with player_col:
-    with st.popover("Player", width="stretch"):
+    with st.popover(f"Player: {st.session_state.player_choice}", width="stretch"):
         st.radio(
             "Player",
             player_options,
             key="player_choice",
             label_visibility="collapsed",
         )
+with source_col:
+    st.text_input(
+        "Source",
+        key="source",
+        placeholder="video file, folder of clips, camera index or URL",
+        label_visibility="collapsed",
+        disabled=session.running,
+    )
+with start_col:
+    if st.button("Start", width="stretch", disabled=session.running):
+        session.start(st.session_state.source)
+        st.rerun()
+with pause_col:
+    paused = session.snapshot()["status"]["state"] == "paused"
+    if st.button("Resume" if paused else "Pause", width="stretch", disabled=not session.running):
+        session.resume() if paused else session.pause()
+        st.rerun()
+with stop_col:
+    if st.button("Stop", width="stretch", disabled=not session.running):
+        session.stop()
+        session.join(timeout=5.0)
+        st.rerun()
 
-selected_team = st.session_state.selected_team
 selected_player = (
-    None
-    if st.session_state.player_choice == ALL_PLAYERS
-    else st.session_state.player_choice
+    None if st.session_state.player_choice == ALL_PLAYERS else st.session_state.player_choice
 )
 
-shot_type_options = ["All", *sorted(shots["shot_type"].dropna().unique().tolist())]
-if "shot_type_filter" not in st.session_state:
-    st.session_state.shot_type_filter = ALL
-if "result_filter" not in st.session_state:
-    st.session_state.result_filter = ALL
-if st.session_state.shot_type_filter not in shot_type_options:
-    st.session_state.shot_type_filter = ALL
+# ------------------------------------------------------------------- body
+video_col, chart_col = st.columns([3, 2], gap="small")
 
-filtered = filter_shots(
-    shots,
-    team=selected_team,
-    player=selected_player,
-    shot_type=st.session_state.shot_type_filter,
-    result=st.session_state.result_filter,
-)
-metrics = shot_metrics(filtered)
-fg = f"{metrics['fg_pct'] * 100:.1f}%"
-tp = f"{metrics['tp_pct'] * 100:.1f}%" if metrics["tpa"] else "—"
 
-info_col, court_col = st.columns([1, 2], gap="small")
-
-with info_col:
-    if selected_player:
-        player_rows = shots[
-            (shots["team"] == selected_team) & (shots["name"] == selected_player)
-        ]
-        jersey = ""
-        if len(player_rows) and player_rows["player_id"].notna().any():
-            jersey = str(player_rows["player_id"].dropna().iloc[0])
-        heading = selected_player
-        team_line = selected_team
-        jersey_line = f"#{jersey}" if jersey else None
+@st.fragment(run_every=0.25)
+def live_frame() -> None:
+    snap = session.snapshot()
+    status = snap["status"]
+    if snap["jpeg"]:
+        st.image(snap["jpeg"], width="stretch")
+    elif status["state"] == "idle":
+        st.info("Press Start to process the source.")
+    elif status["state"] in ("loading models", "warming up team classifier"):
+        st.info(f"{status['state'].capitalize()} in the background (a few minutes on first launch). "
+                "You can press Start now; it begins as soon as they are ready.")
     else:
-        heading = selected_team
-        team_line = None
-        jersey_line = None
+        st.info(f"{status['state'].capitalize()}...")
+    clip = f"clip {status['clip_index']}/{status['n_clips']} · {status['clip']}" if status["clip"] else ""
+    teams_s = "fitted" if status["teams_fitted"] else "bootstrapping"
+    line = (f"<b>{status['state']}</b> · {clip} · frame {status['frame']} · "
+            f"{status['fps']:.1f} fps · teams {teams_s} · {len(snap['rows'])} shots")
+    if status["error"]:
+        line += f" · <span style='color:#B00020'>{status['error']}</span>"
+    st.markdown(f'<div class="live-status">{line}</div>', unsafe_allow_html=True)
+
+
+@st.fragment(run_every=1.0)
+def live_chart() -> None:
+    shots = rows_to_frame(session.snapshot()["rows"])
+    filtered = filter_shots(
+        shots,
+        team=selected_team,
+        player=selected_player,
+        shot_type=st.session_state.shot_type_filter,
+        result=st.session_state.result_filter,
+    )
+    metrics = shot_metrics(filtered)
+    fg = f"{metrics['fg_pct'] * 100:.1f}%" if metrics["fga"] else "—"
+    tp = f"{metrics['tp_pct'] * 100:.1f}%" if metrics["tpa"] else "—"
+
+    if selected_player:
+        player_rows = shots[shots["name"] == selected_player]
+        if selected_team:
+            player_rows = player_rows[player_rows["team"] == selected_team]
+        jersey = str(player_rows["player_id"].dropna().iloc[0]) if player_rows["player_id"].notna().any() else ""
+        team_line = selected_team or (str(player_rows["team"].iloc[0]) if len(player_rows) else "—")
+        heading = selected_player
+    else:
+        heading = selected_team or ALL_TEAMS
+        team_line, jersey = None, ""
 
     details = []
     if selected_player:
         details.append(f"<div><strong>Team</strong> {team_line}</div>")
-        if jersey_line:
-            details.append(f"<div><strong>No.</strong> {jersey_line}</div>")
-    details.append(f"<div><strong>Shots</strong> {metrics['fga']}</div>")
+        if jersey:
+            details.append(f"<div><strong>No.</strong> #{jersey}</div>")
+    details.append(f"<div><strong>Shots</strong> {metrics['fga']} ({metrics['fgm']} made)</div>")
     details.append(f"<div><strong>FG%</strong> {fg}</div>")
     details.append(f"<div><strong>3P%</strong> {tp}</div>")
-
     st.markdown(
         f"""
         <div class="info-panel">
@@ -157,14 +222,31 @@ with info_col:
         unsafe_allow_html=True,
     )
 
-    st.selectbox("Shot type", shot_type_options, key="shot_type_filter")
-    st.selectbox("Result", ["All", "Made", "Missed"], key="result_filter")
-
-with court_col:
-    fig = build_shot_chart(filtered, colors=colors, title=None, height=700)
+    fig = build_shot_chart(filtered, colors=colors, title=None, height=560)
     st.plotly_chart(
         fig,
         width="stretch",
-        height="stretch",
         config={"displayModeBar": False, "responsive": True, "scrollZoom": False},
     )
+
+    if len(filtered):
+        recent = filtered.sort_values(["video", "frame"]).tail(8).iloc[::-1]
+        st.dataframe(
+            recent[["frame", "team", "player_id", "name", "shot_type", "result", "distance"]],
+            hide_index=True,
+            width="stretch",
+        )
+
+
+with video_col:
+    st.markdown('<div class="live-frame"></div>', unsafe_allow_html=True)
+    live_frame()
+    type_col, result_col = st.columns(2, gap="small")
+    with type_col:
+        st.selectbox("Shot type", SHOT_TYPES, key="shot_type_filter")
+    with result_col:
+        st.selectbox("Result", RESULTS, key="result_filter")
+    st.caption("Player names are random roster picks (no stable ID yet; OCR will replace them).")
+
+with chart_col:
+    live_chart()

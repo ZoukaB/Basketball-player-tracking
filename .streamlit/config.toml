@@ -1,0 +1,12 @@
+# Streamlit settings for dashboard/app.py (read when launched from the repo root).
+
+[server]
+# The default watcher (watchdog) puts a watch on the folder of every imported
+# module (thousands under .venv: torch, transformers, inference...). It makes the
+# first load much slower and adds file-system load in the workspace the editor
+# also watches. Restart the server to pick up code changes instead.
+fileWatcherType = "none"
+runOnSave = false
+
+[browser]
+gatherUsageStats = false

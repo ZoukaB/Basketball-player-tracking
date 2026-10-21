@@ -40,9 +40,6 @@ def theme_css(colors: SkillCornerColors | None = None) -> str:
         .stApp, .main {{
             background-color: {colors.white} !important;
             color: {colors.black};
-            overflow: hidden !important;
-            height: 100vh !important;
-            max-height: 100vh !important;
         }}
         [data-testid="stHeader"],
         [data-testid="stToolbar"],
@@ -58,7 +55,6 @@ def theme_css(colors: SkillCornerColors | None = None) -> str:
         .block-container {{
             padding: 0 !important;
             max-width: 100% !important;
-            overflow: hidden !important;
         }}
         [data-testid="stVerticalBlock"] {{
             gap: 0 !important;
@@ -100,10 +96,26 @@ def theme_css(colors: SkillCornerColors | None = None) -> str:
         div[data-baseweb="popover"] span {{
             color: {colors.black} !important;
         }}
-        [data-testid="stHorizontalBlock"]:not(:has([data-testid="stPopover"])) {{
-            height: calc(100vh - 56px) !important;
-            max-height: calc(100vh - 56px) !important;
-            overflow: hidden !important;
+        [data-testid="stHorizontalBlock"]:has([data-testid="stPopover"]) .stButton button {{
+            background-color: {colors.white} !important;
+            color: {colors.black} !important;
+            border: 1px solid {colors.gray} !important;
+            font-weight: 600;
+            height: 2.4rem !important;
+        }}
+        [data-testid="stHorizontalBlock"]:has([data-testid="stPopover"]) .stTextInput input {{
+            background-color: {colors.white} !important;
+            color: {colors.black} !important;
+            height: 2.4rem !important;
+        }}
+        .live-status {{
+            padding: 6px 16px;
+            font-size: 0.85rem;
+            color: {colors.muted};
+            font-family: {colors.font};
+        }}
+        .live-frame {{
+            padding: 12px 8px 0 16px;
         }}
         .stSelectbox label {{
             color: {colors.black} !important;
@@ -154,14 +166,6 @@ def theme_css(colors: SkillCornerColors | None = None) -> str:
             padding: 12px 16px 8px 20px;
             background: {colors.white};
             overflow: visible;
-        }}
-        .stPlotlyChart,
-        .stPlotlyChart > div,
-        .js-plotly-plot,
-        .plot-container {{
-            height: calc(100vh - 56px) !important;
-            max-height: calc(100vh - 56px) !important;
-            overflow: hidden !important;
         }}
     </style>
     """
