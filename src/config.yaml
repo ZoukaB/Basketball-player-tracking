@@ -1,0 +1,189 @@
+# Basketball broadcast analysis pipeline
+# Single input clip per run (edited broadcast: one possession per file).
+
+input:
+  video: data/boston-celtics-new-york-knicks-game-1-q1-01.54-01.48.mp4
+  video_dir: C:/Users/zecab/Desktop/Sport_Cv/Videos/source/boston-celtics-new-york-knicks-game-1
+
+output:
+  dir: outputs
+  annotated_video: outputs/annotated.mp4
+  tracks_csv: outputs/tracks.csv
+  shots_json: outputs/shots.json
+  shots_csv: outputs/shots.csv
+  shot_map: outputs/shot_map.png
+
+analysis:
+  # Global analysis fps: single stride applied to the whole pipeline (RF-DETR + SAM2).
+  # Wired into run.py in brick 2. Video is 30 fps, so 10 => every 3rd frame.
+  fps: 30
+
+detection:
+  model_id: basketball-player-detection-3-ycjdo/4
+  confidence: 0.4
+  iou_threshold: 0.9
+  class_agnostic_nms: false
+  # Per-class geometric/confidence floors ("class_floor"). Any class without an
+  # explicit entry falls back to `default`. `player` is only a SAM2 seed, so its
+  # floor is a light sliver guard; event classes are kept lenient.
+  class_floor:
+    default:              {confidence: 0.40, min_width: 8, min_height: 8, min_area: 200, max_aspect: 8.0}
+    player:               {confidence: 0.40, min_height: 40, max_aspect: 5.0}
+    player_in_possession: {confidence: 0.40}
+    player_jump_shot:     {confidence: 0.40}
+    player_layup_dunk:    {confidence: 0.40}
+    ball:                 {confidence: 0.35, min_width: 6, min_height: 6, min_area: 50, max_aspect: 3.0}
+    rim:                  {confidence: 0.30}
+    number:               {confidence: 0.55, min_width: 6, min_height: 8, max_aspect: 3.0}
+    referee:              {confidence: 0.40}
+  # Drop border slivers: box touching a frame edge and narrower than this.
+  edge_margin_px: 3
+  edge_min_width: 45
+  # Drop `player` boxes that are actually referees: RF-DETR sometimes
+  # double-labels the referee as both class 3 and class 8. IoU >= threshold.
+  referee_suppression:
+    enabled: true
+    iou_threshold: 0.5
+    classes: [3]
+  # NMS: merge duplicate boxes (e.g. layup/dunk in a crowded paint). Per-class so
+  # event labels are not suppressed by an overlapping `player` box.
+  nms:
+    enabled: true
+    iou_threshold: 0.6
+    class_agnostic: false
+
+# RF-DETR class ids (validated from the model at runtime in the smoke test).
+classes:
+  ball: 0
+  ball_in_basket: 1
+  number: 2
+  player: 3
+  player_in_possession: 4
+  player_jump_shot: 5
+  player_layup_dunk: 6
+  player_shot_block: 7
+  referee: 8
+  rim: 9
+  player_ids: [3, 4, 5, 6, 7]
+
+sam2:
+  variant: tiny
+  # `repo_dir` is the real-time SAM2 fork root; `checkpoint` is relative to it.
+  # `config` is relative to the SAM2 *package* (hydra config module root).
+  repo_dir: ../segment-anything-2-real-time
+  checkpoint: checkpoints/sam2.1_hiera_tiny.pt
+  config: configs/sam2.1/sam2.1_hiera_t.yaml
+  # apply_postprocessing=False keeps model.fill_hole_area=0, so the tracking path
+  # never calls the compiled `_C` extension (which is not built on this machine).
+  apply_postprocessing: false
+  seed_class_ids: [3]   # seed SAM2 from `player` only (event classes match later)
+  mask_filter:
+    relative_distance: 0.03
+    mode: edge
+  # Re-prompt policy: when to re-seed SAM2 as more players become visible.
+  # grow_on_new_max: re-prompt when the cleaned detected-player count reaches a
+  # new maximum above the last prompt's count, sustained for `debounce_frames`
+  # and respecting `min_frames_between_reprompts`. A reset only happens when
+  # every currently tracked object is matched to a detection (match_iou), so an
+  # occluded player that SAM2 still tracks is never lost. Default `never` is the
+  # safety net; see notes/future_ideas.md.
+  reprompt_policy: never
+  debounce_frames: 3
+  min_frames_between_reprompts: 15
+  max_tracks: 12
+  # Detection-vs-track IoU below which a track counts as "unmatched" (occluded).
+  match_iou: 0.3
+  # Only used for a warning in the stable seed-once path (continuous video).
+  expected_players: 10
+
+teams:
+  device: cpu
+  batch_size: 32
+  fit_mode: bootstrap_online   # bootstrap_online | offline_stride
+  stride: 30
+  min_crops: 300
+  min_track_ids: 10
+  max_bootstrap_frames: 60
+  # Team is decided per SAM2 track by majority over this many crops.
+  team_votes_target: 5
+  team_names:
+    0: Boston Celtics
+    1: New York Knicks
+  team_colors:
+    Boston Celtics: "#007A33"
+    New York Knicks: "#006BB6"
+  # Jersey number -> player name, per team (notebook cell 19).
+  rosters:
+    New York Knicks:
+      "55": Hukporti
+      "1": Payne
+      "0": Wright
+      "11": Brunson
+      "3": Hart
+      "32": Towns
+      "44": Shamet
+      "25": Bridges
+      "2": McBride
+      "23": Robinson
+      "8": Anunoby
+      "4": Dadiet
+      "5": Achiuwa
+      "13": Kolek
+    Boston Celtics:
+      "42": Horford
+      "55": Scheierman
+      "9": White
+      "20": Davison
+      "7": Brown
+      "0": Tatum
+      "27": Walsh
+      "4": Holiday
+      "8": Porzingis
+      "40": Kornet
+      "88": Queta
+      "11": Pritchard
+      "30": Hauser
+      "12": Craig
+      "26": Tillman
+
+keypoints:
+  model_id: basketball-court-detection-2/14
+  confidence: 0.3
+  anchor_confidence: 0.5
+  league: NBA
+  measurement_unit: FEET
+
+shots:
+  reset_time_frames_s: 1.7
+  min_frames_between_starts_s: 0.5
+  cooldown_frames_after_made_s: 0.5
+  # Offense guard: only the team with the player-in-possession may shoot, and at
+  # most one team attacks a given basket per possession.
+  enforce_offense_team: true
+  possession_class_id: 4
+  offense_lookback_frames: 15
+
+ocr:
+  enabled: false
+  model_id: basketball-jersey-numbers-ocr/7
+  prompt: "Read the number."
+  number_class_id: 2
+  match_threshold: 0.9
+  pad_px: 10
+  n_consecutive: 3
+  # Run OCR every N analysis frames (notebook used every 5).
+  stride_frames: 5
+  # Skip number boxes smaller than this (px); likely a bad jersey angle.
+  min_number_size_px: 12
+
+cuts:
+  # Brightness-invariant hard-cut score: per-frame z-normalized grayscale
+  # mean-absolute-difference. A real cut changes structure; a global exposure
+  # bump does not (removed by normalization). Validated on Bad_detections clip:
+  # cuts score ~0.72-0.76, everything else <= 0.25.
+  z_meandiff_threshold: 0.40
+  min_gap_frames: 5
+
+render:
+  annotated_video: true
+  court_keypoints: true

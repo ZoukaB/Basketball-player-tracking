@@ -1,72 +1,9 @@
-# Python environments
 .venv/
-venv/
-env/
-.env/
-*.env
-
-# Environment variables
-.env
-.env.*
-
-# Python bytecode and caches
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-*.egg-info/
-.eggs/
-dist/
-build/
-*.egg
-
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb_checkpoints
-
-# IDE and editor
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Model weights and checkpoints
-models/*.pt
-models/*.pth
-models/*.onnx
-models/*.weights
-models/*.h5
-models/*.pkl
-models/*.safetensors
-models/checkpoints/
-
-# Data and videos (keep empty folder via .gitkeep)
-data/*
-!data/.gitkeep
+*.pyc
+.env
+artifacts/
+data/
+outputs/
 *.mp4
-*.avi
-*.mov
-*.mkv
-*.wmv
-*.webm
-
-# Generated outputs (keep empty folder via .gitkeep)
-outputs/*
-!outputs/.gitkeep
-
-# Pipeline artifacts (keep empty folder via .gitkeep)
-artifacts/*
-!artifacts/.gitkeep
-
-# Cache files
-.cache/
-*.cache
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-*.log
+AGENTS.md
