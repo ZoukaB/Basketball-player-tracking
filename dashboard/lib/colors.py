@@ -41,6 +41,19 @@ def theme_css(colors: SkillCornerColors | None = None) -> str:
             background-color: {colors.white} !important;
             color: {colors.black};
         }}
+        /* No horizontal scroll, and always reserve the vertical scrollbar's
+           space: otherwise the responsive chart and the scrollbar keep resizing
+           each other (the page "wiggles" sideways). */
+        html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"] {{
+            overflow-x: hidden !important;
+        }}
+        html, [data-testid="stMain"] {{
+            scrollbar-gutter: stable;
+        }}
+        /* Shot type / Result filters: same left inset as the info panel. */
+        .st-key-shot-filters {{
+            padding: 4px 16px 0 20px;
+        }}
         [data-testid="stHeader"],
         [data-testid="stToolbar"],
         [data-testid="stDecoration"],
@@ -96,27 +109,6 @@ def theme_css(colors: SkillCornerColors | None = None) -> str:
         div[data-baseweb="popover"] span {{
             color: {colors.black} !important;
         }}
-        [data-testid="stHorizontalBlock"]:has([data-testid="stPopover"]) .stButton button {{
-            background-color: {colors.white} !important;
-            color: {colors.black} !important;
-            border: 1px solid {colors.gray} !important;
-            font-weight: 600;
-            height: 2.4rem !important;
-        }}
-        [data-testid="stHorizontalBlock"]:has([data-testid="stPopover"]) .stTextInput input {{
-            background-color: {colors.white} !important;
-            color: {colors.black} !important;
-            height: 2.4rem !important;
-        }}
-        .live-status {{
-            padding: 6px 16px;
-            font-size: 0.85rem;
-            color: {colors.muted};
-            font-family: {colors.font};
-        }}
-        .live-frame {{
-            padding: 12px 8px 0 16px;
-        }}
         .stSelectbox label {{
             color: {colors.black} !important;
             font-weight: 600;
@@ -147,6 +139,35 @@ def theme_css(colors: SkillCornerColors | None = None) -> str:
             flex-shrink: 0;
         }}
         .placeholder-bust svg {{ width: 36px; height: 36px; fill: {colors.black}; }}
+        /* Selected player: large headshot, name + stats in a column to its right
+           (wraps under the photo when the panel is narrow). */
+        .player-card {{
+            display: flex;
+            flex-wrap: wrap;
+            align-items: flex-start;
+            gap: 16px;
+        }}
+        .headshot {{
+            width: 210px;
+            max-width: 100%;
+            height: auto;
+            flex-shrink: 0;
+        }}
+        .player-card .info-meta {{
+            margin-top: 0.35rem;
+        }}
+        .team-logo {{
+            width: 64px;
+            height: 64px;
+            object-fit: contain;
+            flex-shrink: 0;
+        }}
+        .logo-inline {{
+            height: 1.2em;
+            width: auto;
+            vertical-align: -0.25em;
+            margin-right: 6px;
+        }}
         .info-name {{
             font-size: 1.35rem;
             font-weight: 700;
