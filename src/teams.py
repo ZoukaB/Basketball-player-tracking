@@ -33,6 +33,10 @@ class TeamBrick:
 
         self.team_names = {int(k): v for k, v in (tcfg.get("team_names") or {}).items()}
         self.team_colors = tcfg.get("team_colors") or {}
+        # Jersey colours actually worn in this game (home/away), for the cluster ->
+        # team mapping. Brand colours can be far off (Celtics: green brand, white
+        # home jersey), which swapped the teams. Falls back to team_colors.
+        self.jersey_colors = tcfg.get("jersey_colors") or {}
 
         self.classifier = TeamClassifier(device=self.device, batch_size=self.batch_size)
         self.track_validator = ConsecutiveValueTracker(n_consecutive=1)
@@ -236,13 +240,16 @@ class TeamBrick:
         return np.array([int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)], dtype=float)
 
     def suggest_mapping(self) -> dict[int, str]:
-        """Suggest cluster -> team name by nearest jersey colour (2-team assignment)."""
+        """Suggest cluster -> team name by nearest jersey colour (2-team assignment).
+
+        Reference colour per team: teams.jersey_colors, else teams.team_colors.
+        """
         clusters = sorted(self.team_names.keys())
         colours = self.cluster_mean_color()
         if len(clusters) != 2 or len(colours) != 2:
             return dict(self.team_names)
         names = [self.team_names[c] for c in clusters]
-        refs = [self._hex_to_rgb(self.team_colors.get(n, "#ffffff")) for n in names]
+        refs = [self._hex_to_rgb(self.jersey_colors.get(n) or self.team_colors.get(n, "#ffffff")) for n in names]
         means = {c: np.array(colours[c][::-1], dtype=float) for c in clusters}  # BGR -> RGB
         d = np.array([[np.linalg.norm(means[c] - refs[j]) for j in range(2)] for c in clusters])
         if d[0, 0] + d[1, 1] <= d[0, 1] + d[1, 0]:

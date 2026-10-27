@@ -12,6 +12,7 @@ Timings are built from the *analysis* fps so the windows stay in seconds.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
@@ -100,9 +101,17 @@ class ShotBrick:
         self.layup_dunk_id = int(classes["player_layup_dunk"])
         self.shot_class_ids = {self.jump_shot_id, self.layup_dunk_id}
 
+        # A tracker restart (MISSED + START in one frame) this soon after the
+        # previous start and this close on court is the same shot whose shot-class
+        # detection flickered (e.g. f92-98, f102-105, f107-109): merge, no phantom miss.
+        self.restart_merge_frames = int(round(scale * scfg.get("restart_merge_s", 1.0)))
+        self.restart_merge_ft = float(scfg.get("restart_merge_ft", 5.0))
+
         self.enforce_offense_team = bool(scfg.get("enforce_offense_team", True))
         self.possession_class_id = int(scfg.get("possession_class_id", 4))
         self.current_offense_team: Optional[int] = None
+        # One team vote per frame with a player-in-possession box (whole clip).
+        self.possession_votes: Counter = Counter()
         self.current_basket: Optional[str] = None
 
         self.shots: list[dict] = []
@@ -128,6 +137,23 @@ class ShotBrick:
 
         events = self.tracker.update(index, has_jump, has_layup, has_basket)
 
+        # Restart: the tracker closed the shot in progress as MISSED because a new
+        # START fired; both arrive in this update, MISSED first.
+        if len(events) == 2 and events[0]["event"] == "MISSED" and events[1]["event"] == "START":
+            capture = self._capture_shooter(
+                frame, index, events[1]["type"], detections, transformer, team_brick, tracked
+            )
+            previous = self._pending
+            if previous is not None and self._same_shot(previous, capture):
+                # Same shot: drop the phantom miss and keep the FIRST start's
+                # capture (where the shot began; a later box can be the defender).
+                previous["restart_frame"] = index
+                events = events[1:]
+            else:
+                self._finalize(index, events[0])
+                self._pending = capture
+            return events
+
         for event in events:
             if event["event"] == "START":
                 self._pending = self._capture_shooter(
@@ -137,6 +163,17 @@ class ShotBrick:
                 self._finalize(index, event)
 
         return events
+
+    def _same_shot(self, previous: dict, capture: dict) -> bool:
+        """Restart within restart_merge_s of the previous start and <= restart_merge_ft away."""
+        start = previous.get("start_frame")
+        if start is None or capture["start_frame"] - start > self.restart_merge_frames:
+            return False
+        px, py = previous.get("court_x"), previous.get("court_y")
+        cx, cy = capture.get("court_x"), capture.get("court_y")
+        if None in (px, py, cx, cy):
+            return True  # no location: time-only, like dedup_clip_shots
+        return float(np.hypot(px - cx, py - cy)) <= self.restart_merge_ft
 
     # ------------------------------------------------------- track helpers
     @staticmethod
@@ -167,6 +204,7 @@ class ShotBrick:
                 team = int(teams[best])
         if team is not None:
             self.current_offense_team = int(team)
+            self.possession_votes[int(team)] += 1
 
         if transformer is not None:
             point = poss.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)
@@ -228,6 +266,24 @@ class ShotBrick:
         if event["event"] in {"MADE", "MISSED"}:
             self._pending = None
 
+    def apply_clip_offense(self) -> Optional[int]:
+        """Call once at the end of a clip: one team per shot, = the offense team.
+
+        A clip is one possession, so with `enforce_offense_team` every shot gets
+        the clip's possession-majority team as both `team` and `offense_team`.
+        The per-crop shooter guess is kept in `shooter_team` (a layup box often
+        holds the defender too). Without possession votes, the shooter guess is
+        used for both. Returns the clip's offense team (or None).
+        """
+        if not self.enforce_offense_team:
+            return None
+        clip_team = self.possession_votes.most_common(1)[0][0] if self.possession_votes else None
+        for shot in self.shots:
+            shot["shooter_team"] = shot.get("team")
+            team = clip_team if clip_team is not None else shot.get("team")
+            shot["team"] = shot["offense_team"] = team
+        return clip_team
+
     # ---------------------------------------------------------------- outputs
     def to_json(self, path: str | Path) -> None:
         path = Path(path)
@@ -236,14 +292,16 @@ class ShotBrick:
             json.dump(self.shots, handle, indent=2)
 
     def draw_shot_map(self, config, teams_cfg: dict) -> np.ndarray:
-        """Half/full court with made (o) / missed (x) per team."""
+        """Half/full court with made (o) / missed (x), coloured by offense team."""
         court = draw_court(config=config)
         team_colors = list(teams_cfg.get("team_colors", {}).values())
         for team_id, hex_color in enumerate(team_colors):
             made = np.array([[s["court_x"], s["court_y"]] for s in self.shots
-                             if s["team"] == team_id and s["made"] and s["court_x"] is not None], dtype=np.float32)
+                             if s.get("offense_team") == team_id and s["made"] and s["court_x"] is not None],
+                            dtype=np.float32)
             missed = np.array([[s["court_x"], s["court_y"]] for s in self.shots
-                               if s["team"] == team_id and not s["made"] and s["court_x"] is not None], dtype=np.float32)
+                               if s.get("offense_team") == team_id and not s["made"] and s["court_x"] is not None],
+                              dtype=np.float32)
             if len(made) == 0 and len(missed) == 0:
                 continue
             court = draw_made_and_miss_on_court(

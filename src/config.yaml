@@ -112,6 +112,12 @@ teams:
   team_colors:
     Boston Celtics: "#007A33"
     New York Knicks: "#006BB6"
+  # Jerseys actually worn in this game, used to map KMeans clusters to teams.
+  # Set per game: the brand colour (Celtics green) is not the home jersey (white),
+  # and mapping on brand colours swapped the two teams.
+  jersey_colors:
+    Boston Celtics: "#F0F0F0"
+    New York Knicks: "#006BB6"
   # Jersey number -> player name, per team (notebook cell 19).
   rosters:
     New York Knicks:
@@ -157,8 +163,13 @@ shots:
   reset_time_frames_s: 1.7
   min_frames_between_starts_s: 0.5
   cooldown_frames_after_made_s: 0.5
-  # Offense guard: only the team with the player-in-possession may shoot, and at
-  # most one team attacks a given basket per possession.
+  # Tracker restart (shot-class detection flickers mid-shot) within this time of
+  # the previous start and this close on court = same shot, no phantom miss.
+  restart_merge_s: 1.0
+  restart_merge_ft: 5.0
+  # Offense guard: a clip is one possession, so every shot's team (= offense team)
+  # is the clip's majority over the player-in-possession team votes
+  # (ShotBrick.apply_clip_offense). The per-crop shooter guess is kept as shooter_team.
   enforce_offense_team: true
   possession_class_id: 4
   offense_lookback_frames: 15

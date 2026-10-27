@@ -217,6 +217,9 @@ def run_video(video_path, cfg: dict, outputs: Optional[dict] = None, shared: Opt
         if sink is not None:
             sink.__exit__(None, None, None)
 
+    # One possession per clip: team = offense = the clip's possession majority.
+    shots.apply_clip_offense()
+
     # Fill jersey numbers (OCR, per track) now that identity is complete.
     for row in track_rows:
         row["number"] = identity.get(int(row["track_id"]), {}).get("number", "")

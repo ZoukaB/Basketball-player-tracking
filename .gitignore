@@ -7,3 +7,6 @@ data/
 outputs/
 *.mp4
 AGENTS.md
+# Player headshots / team logos (NBA/ESPN images): kept local, not versioned
+assets/headshots/
+assets/team_logos/

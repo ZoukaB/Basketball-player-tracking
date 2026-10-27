@@ -127,6 +127,12 @@ def main() -> None:
                     numbers_by_frame[index] = reads
             shots.update(frame, index, detections, transformer=transformer, team_brick=teams)
 
+        # One possession per clip: team = offense = the clip's possession majority.
+        clip_team = shots.apply_clip_offense()
+        print(f"  {video_path.name}: offense (possession majority) = "
+              f"{teams.team_name(clip_team) if clip_team is not None else '?'} "
+              f"votes={ {teams.team_name(t): n for t, n in shots.possession_votes.items()} }")
+
         # De-duplicate: drop only near-simultaneous events (same shot detected twice).
         window_frames = max(1, int(round(analysis_fps * args.dedup_window_s)))
         kept_shots, dropped_shots = dedup_clip_shots(shots.shots, window_frames, args.dedup_dist_ft)
@@ -180,21 +186,19 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(rows)
 
-    # Aggregated shot map (made O / missed X) per team color.
+    # Aggregated shot map (made O / missed X), coloured by offense team.
     court = draw_court(config=keypoints.config)
-    team_names = cfg["teams"]["team_names"]
     team_colors = cfg["teams"]["team_colors"]
-    for team_id, hex_color in enumerate(team_colors.values()):
-        name = team_names.get(team_id)
+    for name, hex_color in team_colors.items():
         made = [
             [float(r["court_x"]), float(r["court_y"])]
             for r in rows
-            if r["team"] == name and r["result"] == "made" and r["court_x"] != ""
+            if r["offense_team"] == name and r["result"] == "made" and r["court_x"] != ""
         ]
         missed = [
             [float(r["court_x"]), float(r["court_y"])]
             for r in rows
-            if r["team"] == name and r["result"] == "missed" and r["court_x"] != ""
+            if r["offense_team"] == name and r["result"] == "missed" and r["court_x"] != ""
         ]
         if not made and not missed:
             continue
