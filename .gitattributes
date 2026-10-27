@@ -1,0 +1,4 @@
+# Notebooks embed their outputs (images, videos, logs) and dwarf the Python code
+# in GitHub's byte-based language stats. Count them as documentation so the repo
+# shows as Python. They still render normally on GitHub.
+*.ipynb linguist-documentation
