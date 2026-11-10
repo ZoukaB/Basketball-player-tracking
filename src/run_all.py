@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fnmatch
 import sys
 from pathlib import Path
 
@@ -71,8 +72,10 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def list_videos(video_dir: str | Path, limit: int) -> list[Path]:
-    files = [p for p in Path(video_dir).iterdir() if p.suffix.lower() in VIDEO_EXTS]
+def list_videos(video_dir: str | Path, limit: int, exclude: list[str] | None = None) -> list[Path]:
+    exclude = exclude or []
+    files = [p for p in Path(video_dir).iterdir()
+             if p.suffix.lower() in VIDEO_EXTS and not any(fnmatch.fnmatch(p.name, pat) for pat in exclude)]
     files.sort(key=lambda p: p.name)
     return files[:limit] if limit else files
 
@@ -87,7 +90,9 @@ def main() -> None:
         cfg["ocr"]["enabled"] = True
 
     video_dir = args.video_dir or cfg["input"]["video_dir"]
-    videos = list_videos(video_dir, args.limit)
+    # input.exclude only applies to the default listing: --videos picks explicitly.
+    exclude = None if args.videos else cfg["input"].get("exclude")
+    videos = list_videos(video_dir, args.limit, exclude=exclude)
     if args.videos:
         subs = [s.strip() for s in args.videos.split(",") if s.strip()]
         videos = [p for p in videos if any(s in p.name for s in subs)]

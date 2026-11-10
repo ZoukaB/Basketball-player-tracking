@@ -5,6 +5,11 @@
 2) For each video, detect shots (detection + keypoints/homography; no SAM2) and
    aggregate to outputs/shots.csv + outputs/shot_map.png.
 
+A video may hold several possessions (e.g. clips joined into one file): with
+`cuts.split_segments`, it is split at hard cuts and every segment is processed
+like a one-possession clip (fresh ShotBrick + homography, offense rule and dedup
+per segment). Rows carry `segment` and `segment_frame`.
+
 Usage (from repo root):
     .venv/Scripts/python.exe src/collect_shots.py
     .venv/Scripts/python.exe src/collect_shots.py --limit 3 --max-seconds 10
@@ -27,7 +32,14 @@ from src.keypoints import KeypointBrick  # noqa: E402
 from src.ocr import OCRBrick  # noqa: E402
 from src.shots import ShotBrick, dedup_clip_shots, shot_distance  # noqa: E402
 from src.teams import TeamBrick, resolve_team_mapping  # noqa: E402
-from src.utils import analysis_stride, list_videos, load_config, resolve_path, setup_env  # noqa: E402
+from src.utils import (  # noqa: E402
+    FrameCutDetector,
+    analysis_stride,
+    list_videos,
+    load_config,
+    resolve_path,
+    setup_env,
+)
 
 import cv2  # noqa: E402
 import supervision as sv  # noqa: E402
@@ -38,7 +50,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--video-dir", default=None, help="Override config input.video_dir")
     p.add_argument("--limit", type=int, default=3, help="Process N videos (smallest first)")
     p.add_argument("--max-seconds", type=float, default=10.0, help="Cap per video (0 = full)")
-    p.add_argument("--fit-seconds", type=float, default=20.0, help="Cap per video for the team fit")
+    p.add_argument("--fit-seconds", type=float, default=0.0,
+                   help="Cap per video for the team fit (0 = whole video; a 20 s cap only saw "
+                        "the first possessions of a joined video)")
     p.add_argument("--fit-stride", type=int, default=30, help="Stride for the team fit")
     p.add_argument("--out-dir", default=None, help="Write shots.csv + shot_map.png here")
     p.add_argument("--videos", default="", help="Comma-separated name substrings to select specific videos")
@@ -51,6 +65,72 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def close_segment(
+    video_name: str,
+    segment: int,
+    segment_start: int,
+    shots: ShotBrick,
+    numbers_by_frame: dict[int, list],
+    teams: TeamBrick,
+    ocr: OCRBrick,
+    analysis_fps: float,
+    args: argparse.Namespace,
+) -> tuple[list[dict], int]:
+    """End of one possession (clip, or segment between hard cuts): offense rule,
+    dedup, shot rows. Returns (rows, number of deduped shots)."""
+    label = f"{video_name} [segment {segment}]"
+    # One possession per segment: team = offense = the segment's possession majority.
+    clip_team = shots.apply_clip_offense()
+    print(f"  {label}: offense (possession majority) = "
+          f"{teams.team_name(clip_team) if clip_team is not None else '?'} "
+          f"votes={ {teams.team_name(t): n for t, n in shots.possession_votes.items()} }")
+
+    # De-duplicate: drop only near-simultaneous events (same shot detected twice).
+    window_frames = max(1, int(round(analysis_fps * args.dedup_window_s)))
+    kept_shots, dropped_shots = dedup_clip_shots(shots.shots, window_frames, args.dedup_dist_ft)
+    for shot in dropped_shots:
+        print(f"  [DEDUP-DROP] {label} f{shot['frame']} {shot['outcome']} "
+              f"{shot['type']} loc=({shot.get('court_x')},{shot.get('court_y')}) "
+              f"team={shot.get('team')} offense={shot.get('offense_team')}")
+
+    rows = []
+    for shot in kept_shots:
+        team_id = shot.get("team")
+        offense_id = shot.get("offense_team")
+        attacking = shot.get("attacking_basket")
+        cx, cy = shot.get("court_x"), shot.get("court_y")
+        distance = shot_distance(shot)
+
+        # Shooter number from OCR (matched to the shooter box).
+        start_index = shot.get("start_frame", shot.get("frame"))
+        reads = numbers_by_frame.get(start_index) or numbers_by_frame.get(shot.get("frame"))
+        number = ocr.match_number(shot.get("shooter_box"), reads) if reads else None
+        identity_team = team_id if team_id is not None else offense_id
+        name = ocr.resolve_name(identity_team, number) if number else None
+        player_id = f"{number} {name}" if (number and name) else (str(number) if number else "")
+
+        rows.append(
+            {
+                "video": video_name,
+                "segment": segment,
+                "frame": shot["frame"],
+                "segment_frame": shot["frame"] - segment_start,
+                "shot_type": shot.get("type", ""),
+                "result": shot.get("outcome", ""),
+                "team": teams.team_name(team_id) if team_id is not None else "",
+                "number": number or "",
+                "offense_team": teams.team_name(offense_id) if offense_id is not None else "",
+                "attacking_basket": attacking or "",
+                "court_x": "" if cx is None else round(cx, 2),
+                "court_y": "" if cy is None else round(cy, 2),
+                "distance_ft": "" if distance is None else round(distance, 2),
+                "player_id": player_id,
+            }
+        )
+    print(f"  {label}: kept {len(kept_shots)}, deduped {len(dropped_shots)}")
+    return rows, len(dropped_shots)
+
+
 def main() -> None:
     args = parse_args()
     setup_env()
@@ -59,7 +139,9 @@ def main() -> None:
         cfg["ocr"]["enabled"] = True
 
     video_dir = args.video_dir or cfg["input"]["video_dir"]
-    videos = list_videos(video_dir, args.limit)
+    # input.exclude only applies to the default listing: --videos picks explicitly.
+    exclude = None if args.videos else cfg["input"].get("exclude")
+    videos = list_videos(video_dir, args.limit, exclude=exclude)
     if args.videos:
         subs = [s.strip() for s in args.videos.split(",") if s.strip()]
         videos = [p for p in videos if any(s in p.name for s in subs)]
@@ -97,19 +179,39 @@ def main() -> None:
 
     rows: list[dict] = []
     dropped_count = 0
+    cuts_cfg = cfg.get("cuts", {})
+    split_segments = bool(cuts_cfg.get("split_segments", True))
     for video_path in videos:
         info = sv.VideoInfo.from_video_path(str(video_path))
         stride = analysis_stride(cfg, info.fps)
         analysis_fps = info.fps / stride
-        shots = ShotBrick(cfg, analysis_fps=analysis_fps)
         max_frames = int(round(args.max_seconds * info.fps / stride)) if args.max_seconds else 0
+        cut_detector = (
+            FrameCutDetector(cuts_cfg["z_meandiff_threshold"], cuts_cfg.get("min_gap_frames", 0))
+            if split_segments else None
+        )
+
+        # Per-possession state, reset at every hard cut.
+        segment, segment_start = 0, 0
+        shots = ShotBrick(cfg, analysis_fps=analysis_fps)
         numbers_by_frame: dict[int, list] = {}
+        transformer = None
 
         generator = sv.get_video_frames_generator(source_path=str(video_path), stride=stride)
-        transformer = None
         for index, frame in enumerate(generator):
             if max_frames and index >= max_frames:
                 break
+            if cut_detector is not None and cut_detector.update(frame)[0]:
+                # Hard cut = new possession: close the segment, start fresh.
+                seg_rows, seg_dropped = close_segment(video_path.name, segment, segment_start, shots,
+                                                      numbers_by_frame, teams, ocr, analysis_fps, args)
+                rows.extend(seg_rows)
+                dropped_count += seg_dropped
+                segment, segment_start = segment + 1, index
+                shots = ShotBrick(cfg, analysis_fps=analysis_fps)
+                numbers_by_frame = {}
+                transformer = None
+                print(f"  [CUT] {video_path.name} frame {index} -> segment {segment}")
             detections = detector.detect(frame)
             # Only recompute keypoints/homography when shot-relevant classes are
             # present (jump=5, layup=6, ball-in-basket=1); else reuse the last one.
@@ -127,60 +229,17 @@ def main() -> None:
                     numbers_by_frame[index] = reads
             shots.update(frame, index, detections, transformer=transformer, team_brick=teams)
 
-        # One possession per clip: team = offense = the clip's possession majority.
-        clip_team = shots.apply_clip_offense()
-        print(f"  {video_path.name}: offense (possession majority) = "
-              f"{teams.team_name(clip_team) if clip_team is not None else '?'} "
-              f"votes={ {teams.team_name(t): n for t, n in shots.possession_votes.items()} }")
-
-        # De-duplicate: drop only near-simultaneous events (same shot detected twice).
-        window_frames = max(1, int(round(analysis_fps * args.dedup_window_s)))
-        kept_shots, dropped_shots = dedup_clip_shots(shots.shots, window_frames, args.dedup_dist_ft)
-        dropped_count += len(dropped_shots)
-        for shot in dropped_shots:
-            print(f"  [DEDUP-DROP] {video_path.name} f{shot['frame']} {shot['outcome']} "
-                  f"{shot['type']} loc=({shot.get('court_x')},{shot.get('court_y')}) "
-                  f"team={shot.get('team')} offense={shot.get('offense_team')}")
-
-        for shot in kept_shots:
-            team_id = shot.get("team")
-            offense_id = shot.get("offense_team")
-            attacking = shot.get("attacking_basket")
-            cx, cy = shot.get("court_x"), shot.get("court_y")
-            distance = shot_distance(shot)
-
-            # Shooter number from OCR (matched to the shooter box).
-            start_index = shot.get("start_frame", shot.get("frame"))
-            reads = numbers_by_frame.get(start_index) or numbers_by_frame.get(shot.get("frame"))
-            number = ocr.match_number(shot.get("shooter_box"), reads) if reads else None
-            identity_team = team_id if team_id is not None else offense_id
-            name = ocr.resolve_name(identity_team, number) if number else None
-            player_id = f"{number} {name}" if (number and name) else (str(number) if number else "")
-
-            rows.append(
-                {
-                    "video": video_path.name,
-                    "frame": shot["frame"],
-                    "shot_type": shot.get("type", ""),
-                    "result": shot.get("outcome", ""),
-                    "team": teams.team_name(team_id) if team_id is not None else "",
-                    "number": number or "",
-                    "offense_team": teams.team_name(offense_id) if offense_id is not None else "",
-                    "attacking_basket": attacking or "",
-                    "court_x": "" if cx is None else round(cx, 2),
-                    "court_y": "" if cy is None else round(cy, 2),
-                    "distance_ft": "" if distance is None else round(distance, 2),
-                    "player_id": player_id,
-                }
-            )
-        print(f"  {video_path.name}: kept {len(kept_shots)}, deduped {len(dropped_shots)}")
+        seg_rows, seg_dropped = close_segment(video_path.name, segment, segment_start, shots,
+                                              numbers_by_frame, teams, ocr, analysis_fps, args)
+        rows.extend(seg_rows)
+        dropped_count += seg_dropped
 
     shots_csv = out_dir / "shots.csv"
     with open(shots_csv, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["video", "frame", "shot_type", "result", "team", "number",
-                        "offense_team", "attacking_basket", "court_x", "court_y",
+            fieldnames=["video", "segment", "frame", "segment_frame", "shot_type", "result", "team",
+                        "number", "offense_team", "attacking_basket", "court_x", "court_y",
                         "distance_ft", "player_id"],
         )
         writer.writeheader()
@@ -234,7 +293,7 @@ def main() -> None:
     print(f"Videos: {len(videos)}")
     print(f"Shots kept: {len(rows)}  (dropped total: {dropped_count})")
     for r in rows:
-        print(f"  {r['video']} f{r['frame']} {r['shot_type']} {r['result']} "
+        print(f"  {r['video']} seg{r['segment']} f{r['frame']} {r['shot_type']} {r['result']} "
               f"team={r['team'] or '?'} offense={r['offense_team'] or '?'} "
               f"basket={r['attacking_basket'] or '?'} loc=({r['court_x']},{r['court_y']}) dist={r['distance_ft']}")
     print(f"Wrote {shots_csv}")

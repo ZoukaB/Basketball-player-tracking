@@ -1,6 +1,7 @@
 """Shared helpers: repo paths, environment/API-key setup, config loading."""
 from __future__ import annotations
 
+import fnmatch
 import os
 from pathlib import Path
 
@@ -12,9 +13,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 VIDEO_EXTS = {".mp4", ".avi", ".mov"}
 
 
-def list_videos(video_dir: str | Path, limit: int | None) -> list[Path]:
-    """Video files in `video_dir`, smallest first, optionally capped to `limit`."""
-    files = [p for p in Path(video_dir).iterdir() if p.suffix.lower() in VIDEO_EXTS]
+def list_videos(video_dir: str | Path, limit: int | None, exclude: list[str] | None = None) -> list[Path]:
+    """Video files in `video_dir`, smallest first, optionally capped to `limit`.
+
+    `exclude`: filename glob patterns to skip (config `input.exclude`), e.g. a
+    joined multi-possession video sitting next to its source clips.
+    """
+    exclude = exclude or []
+    files = [p for p in Path(video_dir).iterdir()
+             if p.suffix.lower() in VIDEO_EXTS and not any(fnmatch.fnmatch(p.name, pat) for pat in exclude)]
     files.sort(key=lambda p: p.stat().st_size)
     return files[:limit] if limit else files
 

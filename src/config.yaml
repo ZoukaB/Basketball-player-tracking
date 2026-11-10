@@ -4,6 +4,10 @@
 input:
   video: data/boston-celtics-new-york-knicks-game-1-q1-01.54-01.48.mp4
   video_dir: C:/Users/zecab/Desktop/Sport_Cv/Videos/source/boston-celtics-new-york-knicks-game-1
+  # Filename patterns skipped when listing video_dir (e.g. the joined
+  # 10-possession video stored next to its source clips: its shots would be
+  # counted twice).
+  exclude: ["*1video*"]
 
 output:
   dir: outputs
@@ -194,6 +198,11 @@ cuts:
   # cuts score ~0.72-0.76, everything else <= 0.25.
   z_meandiff_threshold: 0.40
   min_gap_frames: 5
+  # collect_shots: split a video at hard cuts and process each segment as one
+  # possession (fresh ShotBrick + homography, offense rule + dedup per segment).
+  # On the joined 10-possession video: 9/9 cuts found (scores 0.74-1.04, every
+  # other frame <= 0.26).
+  split_segments: true
 
 render:
   annotated_video: true
