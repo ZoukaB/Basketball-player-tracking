@@ -73,6 +73,8 @@ def parse_args() -> argparse.Namespace:
     # seconds. On Q1_part1 the scores are stable from 3 s to 4 s; 2 s splits
     # ~6 true shots into a miss + a false detection.
     p.add_argument("--tolerance-s", type=float, default=3.0, help="Max |time difference| for a match")
+    p.add_argument("--result-penalty-s", type=float, default=1.0,
+                   help="Matching tie-break: extra cost (s) when made/missed disagree")
     p.add_argument("--team-column", default="team", help="Prediction column giving the shot's team")
     p.add_argument("--out", default=None, help="Write metrics JSON + confusion-matrix PNG with this path stem")
     return p.parse_args()
@@ -141,13 +143,22 @@ def load_pred(path: Path, fps: float, team_column: str, video_name: str | None) 
 
 
 # ----------------------------------------------------------------- matching
-def match(gt: pd.DataFrame, pred: pd.DataFrame, tolerance_s: float) -> list[tuple[int, int]]:
-    """One-to-one (gt_index, pred_index) pairs minimising total |dt|, all within tolerance."""
+def match(gt: pd.DataFrame, pred: pd.DataFrame, tolerance_s: float,
+          result_penalty_s: float = 0.0) -> list[tuple[int, int]]:
+    """One-to-one (gt_index, pred_index) pairs, all within tolerance.
+
+    Cost = |dt|, plus `result_penalty_s` when made/missed disagree: on near-ties
+    (e.g. a miss then the putback a second later) the pair with the same result
+    wins. Which shots can match is decided by time alone.
+    """
     if gt.empty or pred.empty:
         return []
     dt = np.abs(gt["time_s"].to_numpy()[:, None] - pred["time_s"].to_numpy()[None, :])
+    cost = dt.copy()
+    if result_penalty_s and "result" in gt and "result" in pred:
+        cost += result_penalty_s * (gt["result"].to_numpy()[:, None] != pred["result"].to_numpy()[None, :])
     big = 1e6
-    rows, cols = linear_sum_assignment(np.where(dt <= tolerance_s, dt, big))
+    rows, cols = linear_sum_assignment(np.where(dt <= tolerance_s, cost, big))
     return [(int(r), int(c)) for r, c in zip(rows, cols) if dt[r, c] <= tolerance_s]
 
 
@@ -174,6 +185,13 @@ def evaluate(gt: pd.DataFrame, pred: pd.DataFrame, pairs: list[tuple[int, int]])
                       "precision": precision, "recall": recall, "f1": f1},
         "attributes": {},
     }
+    # Makes: predicted makes that are real makes / real makes predicted as made.
+    pred_made = int((pred["result"] == "Made").sum())
+    gt_made = int((gt["result"] == "Made").sum())
+    true_made = sum(1 for g, p in pairs if gt.loc[g, "result"] == "Made" and pred.loc[p, "result"] == "Made")
+    report["makes"] = {"pred_made": pred_made, "gt_made": gt_made, "true_made": true_made,
+                       "precision": true_made / pred_made if pred_made else 0.0,
+                       "recall": true_made / gt_made if gt_made else 0.0}
     for attr, labels in LABELS.items():
         true = [gt.loc[g, attr] for g, _ in pairs]
         guess = [pred.loc[p, attr] for _, p in pairs]
@@ -192,6 +210,9 @@ def print_report(gt, pred, pairs, report) -> None:
     print(f"Ground truth: {report['n_gt']} shots | predictions: {report['n_pred']} shots")
     print(f"\nDETECTION  precision {det['precision']:.2f}  recall {det['recall']:.2f}  F1 {det['f1']:.2f}"
           f"   (matched {det['tp']}, missed {det['fn_missed']}, false {det['fp_extra']})")
+    mk = report["makes"]
+    print(f"MAKES      precision {mk['precision']:.2f}  recall {mk['recall']:.2f}"
+          f"   ({mk['true_made']} real of {mk['pred_made']} predicted makes; {mk['gt_made']} makes in GT)")
     for attr, res in report["attributes"].items():
         print(f"\n{attr.upper()}  accuracy {res['accuracy']:.2f} on {det['tp']} matched shots")
         print(res["confusion"].to_string())
@@ -264,7 +285,7 @@ def main() -> None:
         cap.release()
     gt = load_gt(resolve_path(args.gt))
     pred = load_pred(resolve_path(args.pred), fps, args.team_column, args.video_name)
-    pairs = match(gt, pred, args.tolerance_s)
+    pairs = match(gt, pred, args.tolerance_s, args.result_penalty_s)
     report = evaluate(gt, pred, pairs)
     print_report(gt, pred, pairs, report)
     if args.out:

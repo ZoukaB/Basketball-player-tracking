@@ -96,6 +96,8 @@ class ShotBrick:
             cooldown_frames_after_made=int(round(scale * scfg.get("cooldown_frames_after_made_s", 0.5))),
         )
         classes = cfg["classes"]
+        self.ball_id = int(classes["ball"])
+        self.rim_id = int(classes["rim"])
         self.ball_in_basket_id = int(classes["ball_in_basket"])
         self.jump_shot_id = int(classes["player_jump_shot"])
         self.layup_dunk_id = int(classes["player_layup_dunk"])
@@ -106,6 +108,13 @@ class ShotBrick:
         # detection flickered (e.g. f92-98, f102-105, f107-109): merge, no phantom miss.
         self.restart_merge_frames = int(round(scale * scfg.get("restart_merge_s", 1.0)))
         self.restart_merge_ft = float(scfg.get("restart_merge_ft", 5.0))
+
+        # Make gate: a basket only counts if the ball was seen above a rim
+        # shortly before (a real make goes over then into the rim). Without it,
+        # ball-in-basket boxes near the rim during rebounds/drives gave false makes.
+        self.make_require_ball_above = bool(scfg.get("make_require_ball_above", False))
+        self.make_ball_above_frames = int(round(scale * scfg.get("make_ball_above_window_s", 1.0)))
+        self._last_ball_above: Optional[int] = None
 
         self.enforce_offense_team = bool(scfg.get("enforce_offense_team", True))
         self.possession_class_id = int(scfg.get("possession_class_id", 4))
@@ -134,6 +143,11 @@ class ShotBrick:
         has_jump = bool(np.any(detections.class_id == self.jump_shot_id)) if len(detections) else False
         has_layup = bool(np.any(detections.class_id == self.layup_dunk_id)) if len(detections) else False
         has_basket = bool(np.any(detections.class_id == self.ball_in_basket_id)) if len(detections) else False
+        if self.make_require_ball_above:
+            if self._ball_above_rim(detections):
+                self._last_ball_above = index
+            recent = self._last_ball_above is not None and index - self._last_ball_above <= self.make_ball_above_frames
+            has_basket = has_basket and recent
 
         events = self.tracker.update(index, has_jump, has_layup, has_basket)
 
@@ -163,6 +177,19 @@ class ShotBrick:
                 self._finalize(index, event)
 
         return events
+
+    def _ball_above_rim(self, detections: sv.Detections) -> bool:
+        """A ball box horizontally over a rim, its bottom above the rim's middle."""
+        if detections is None or len(detections) == 0:
+            return False
+        balls = detections.xyxy[detections.class_id == self.ball_id]
+        rims = detections.xyxy[detections.class_id == self.rim_id]
+        for b in balls:
+            cx = 0.5 * (b[0] + b[2])
+            for r in rims:
+                if r[0] <= cx <= r[2] and b[3] <= r[1] + 0.5 * (r[3] - r[1]):
+                    return True
+        return False
 
     def _same_shot(self, previous: dict, capture: dict) -> bool:
         """Restart within restart_merge_s of the previous start and <= restart_merge_ft away."""
