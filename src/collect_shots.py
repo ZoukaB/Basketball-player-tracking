@@ -30,7 +30,13 @@ if str(REPO_ROOT) not in sys.path:
 from src.detection import Detector  # noqa: E402
 from src.keypoints import KeypointBrick  # noqa: E402
 from src.ocr import OCRBrick  # noqa: E402
-from src.shots import ShotBrick, dedup_clip_shots, shot_distance  # noqa: E402
+from src.shots import (  # noqa: E402
+    ShotBrick,
+    apply_basket_side_teams,
+    basket_side_mapping,
+    dedup_clip_shots,
+    shot_distance,
+)
 from src.teams import TeamBrick, resolve_team_mapping  # noqa: E402
 from src.utils import (  # noqa: E402
     FrameCutDetector,
@@ -181,6 +187,7 @@ def main() -> None:
     dropped_count = 0
     cuts_cfg = cfg.get("cuts", {})
     split_segments = bool(cuts_cfg.get("split_segments", True))
+    scfg = cfg["shots"]
     for video_path in videos:
         info = sv.VideoInfo.from_video_path(str(video_path))
         stride = analysis_stride(cfg, info.fps)
@@ -234,12 +241,29 @@ def main() -> None:
         rows.extend(seg_rows)
         dropped_count += seg_dropped
 
+        # Team = team attacking the shot's basket, learned over the whole video.
+        video_rows = [r for r in rows if r["video"] == video_path.name]
+        for r in video_rows:
+            r.setdefault("shooter_team", r["team"])
+        if scfg.get("team_by_basket_side", False):
+            mapping, votes, reason = basket_side_mapping(
+                video_rows, min_share=float(scfg.get("basket_side_min_share", 0.6)),
+                min_shots=int(scfg.get("basket_side_min_shots", 3)))
+            summary = {side: dict(c) for side, c in votes.items()}
+            if mapping:
+                changed = apply_basket_side_teams(video_rows, mapping)
+                print(f"  {video_path.name}: team by basket side {mapping} (votes {summary}), "
+                      f"{changed} shot team(s) changed")
+            else:
+                print(f"  [WARN] {video_path.name}: basket-side teams not applied ({reason}; "
+                      f"votes {summary}); keeping per-shot teams")
+
     shots_csv = out_dir / "shots.csv"
     with open(shots_csv, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=["video", "segment", "frame", "segment_frame", "shot_type", "result", "team",
-                        "number", "offense_team", "attacking_basket", "court_x", "court_y",
+                        "shooter_team", "number", "offense_team", "attacking_basket", "court_x", "court_y",
                         "distance_ft", "player_id"],
         )
         writer.writeheader()

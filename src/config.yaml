@@ -184,6 +184,15 @@ shots:
   # up for the rebound). Q1_part1: 6 false starts removed, no real shot lost.
   drop_rebound_layups: true
   rebound_window_s: 1.0
+  # Team by basket side (collect_shots, per video): within a half each team
+  # attacks one basket, so the majority of per-shot team guesses on each side
+  # gives a basket -> team map that sets every shot's team (crop guess kept as
+  # shooter_team). Skipped with a warning when a side has < min_shots, a
+  # majority < min_share, or both sides map to one team (e.g. video spanning
+  # halftime). Q1_part1: per-shot 0.82 -> basket side 22/22.
+  team_by_basket_side: true
+  basket_side_min_share: 0.6
+  basket_side_min_shots: 3
   # Offense guard: a clip is one possession, so every shot's team (= offense team)
   # is the clip's majority over the player-in-possession team votes
   # (ShotBrick.apply_clip_offense). The per-crop shooter guess is kept as shooter_team.

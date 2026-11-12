@@ -56,6 +56,51 @@ def shot_priority(shot: dict):
     return (off_match, made, -int(shot["frame"]))
 
 
+def basket_side_mapping(rows: list[dict], min_share: float = 0.6, min_shots: int = 3):
+    """Learn which team attacks which basket from the shots' own team guesses.
+
+    Within a half each team attacks one basket, so the per-shot (crop) team
+    votes, grouped by the side the shot was taken on, give a basket -> team map
+    even when single guesses are noisy. Rows need `court_x` and `team` (names).
+    Returns (mapping {"left"/"right": team} or None, votes per side, reason):
+    None when a side has < min_shots, a majority < min_share, or both sides
+    point to the same team (e.g. a video spanning halftime).
+    """
+    votes = {"left": Counter(), "right": Counter()}
+    for row in rows:
+        x, team = row.get("court_x"), row.get("team")
+        if x in ("", None) or not team:
+            continue
+        votes[basket_side(float(x))][team] += 1
+    mapping = {}
+    for side, counter in votes.items():
+        n = sum(counter.values())
+        if n < min_shots:
+            return None, votes, f"{side} basket: only {n} shots"
+        team, k = counter.most_common(1)[0]
+        if k / n < min_share:
+            return None, votes, f"{side} basket: majority {k}/{n} < {min_share}"
+        mapping[side] = team
+    if mapping["left"] == mapping["right"]:
+        return None, votes, f"both baskets -> {mapping['left']}"
+    return mapping, votes, "ok"
+
+
+def apply_basket_side_teams(rows: list[dict], mapping: dict[str, str]) -> int:
+    """team = offense_team = team attacking the shot's basket; the previous
+    (crop) team is kept as shooter_team. Rows without court_x are unchanged.
+    Returns the number of rows whose team changed."""
+    changed = 0
+    for row in rows:
+        row.setdefault("shooter_team", row.get("team", ""))
+        if row.get("court_x") in ("", None):
+            continue
+        team = mapping[basket_side(float(row["court_x"]))]
+        changed += team != row.get("team")
+        row["team"] = row["offense_team"] = team
+    return changed
+
+
 def _is_duplicate(a: dict, b: dict, window_frames: int, dist_ft: float) -> bool:
     if abs(int(a["frame"]) - int(b["frame"])) > window_frames:
         return False
