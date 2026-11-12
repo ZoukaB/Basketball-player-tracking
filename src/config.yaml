@@ -166,7 +166,10 @@ keypoints:
 shots:
   reset_time_frames_s: 1.7
   min_frames_between_starts_s: 0.5
-  cooldown_frames_after_made_s: 0.5
+  # No new shot start this soon after a make (players under the net). 1.5 s:
+  # a start 0.6 s after a make was false; the quickest real shot after a make
+  # (Q1_part1 + game 1) came 2.1 s later.
+  cooldown_frames_after_made_s: 1.5
   # Tracker restart (shot-class detection flickers mid-shot) within this time of
   # the previous start and this close on court = same shot, no phantom miss.
   restart_merge_s: 1.0
@@ -176,6 +179,11 @@ shots:
   # false makes (ball-in-basket boxes during rebounds/drives) did not.
   make_require_ball_above: true
   make_ball_above_window_s: 1.0
+  # Rebound filter: drop a layup that starts within rebound_window_s after a
+  # missed shot, ends missed and never has the ball above a rim (players going
+  # up for the rebound). Q1_part1: 6 false starts removed, no real shot lost.
+  drop_rebound_layups: true
+  rebound_window_s: 1.0
   # Offense guard: a clip is one possession, so every shot's team (= offense team)
   # is the clip's majority over the player-in-possession team votes
   # (ShotBrick.apply_clip_offense). The per-crop shooter guess is kept as shooter_team.

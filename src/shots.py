@@ -116,6 +116,15 @@ class ShotBrick:
         self.make_ball_above_frames = int(round(scale * scfg.get("make_ball_above_window_s", 1.0)))
         self._last_ball_above: Optional[int] = None
 
+        # Rebound filter: a layup starting within rebound_window_s after a missed
+        # shot was decided, that ends missed without the ball ever above a rim, is
+        # a player going up for the rebound, not a shot (Q1_part1: 6 false starts,
+        # no real shot lost). Putbacks that score have the ball above the rim.
+        self.drop_rebound_layups = bool(scfg.get("drop_rebound_layups", False))
+        self.rebound_window_frames = int(round(scale * scfg.get("rebound_window_s", 1.0)))
+        self._last_decision: Optional[tuple[int, bool]] = None  # (frame, made)
+        self.dropped_rebounds: list[dict] = []
+
         self.enforce_offense_team = bool(scfg.get("enforce_offense_team", True))
         self.possession_class_id = int(scfg.get("possession_class_id", 4))
         self.current_offense_team: Optional[int] = None
@@ -143,9 +152,10 @@ class ShotBrick:
         has_jump = bool(np.any(detections.class_id == self.jump_shot_id)) if len(detections) else False
         has_layup = bool(np.any(detections.class_id == self.layup_dunk_id)) if len(detections) else False
         has_basket = bool(np.any(detections.class_id == self.ball_in_basket_id)) if len(detections) else False
-        if self.make_require_ball_above:
+        if self.make_require_ball_above or self.drop_rebound_layups:
             if self._ball_above_rim(detections):
                 self._last_ball_above = index
+        if self.make_require_ball_above:
             recent = self._last_ball_above is not None and index - self._last_ball_above <= self.make_ball_above_frames
             has_basket = has_basket and recent
 
@@ -288,10 +298,26 @@ class ShotBrick:
             }
         )
         record["shot_basket"] = basket_side(record["court_x"]) if record["court_x"] is not None else None
-        self.shots.append(record)
+
+        previous = self._last_decision
+        self._last_decision = (index, record["made"])
+        if self._is_rebound_layup(record, previous):
+            self.dropped_rebounds.append(record)
+        else:
+            self.shots.append(record)
 
         if event["event"] in {"MADE", "MISSED"}:
             self._pending = None
+
+    def _is_rebound_layup(self, record: dict, previous: Optional[tuple[int, bool]]) -> bool:
+        """Missed layup starting right after a missed shot, ball never above a rim."""
+        start = record.get("start_frame")
+        if not self.drop_rebound_layups or record["made"] or record["type"] != "LAYUP" or start is None:
+            return False
+        if previous is None or previous[1] or start - previous[0] > self.rebound_window_frames:
+            return False
+        ball_above = self._last_ball_above is not None and self._last_ball_above >= start
+        return not ball_above
 
     def apply_clip_offense(self) -> Optional[int]:
         """Call once at the end of a clip: one team per shot, = the offense team.
