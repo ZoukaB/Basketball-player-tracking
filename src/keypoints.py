@@ -53,6 +53,9 @@ class KeypointBrick:
         confidence = getattr(key_points, "keypoint_confidence", None)
         if confidence is None:
             confidence = key_points.confidence
+        if confidence is None or len(confidence) == 0:
+            # No court found (close-up, crowd, replay graphic): no anchors, so no homography.
+            return key_points, np.zeros(len(self.config.vertices), dtype=bool)
         mask = np.asarray(confidence[0]) > self.anchor_confidence
         return key_points, mask
 
