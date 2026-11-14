@@ -5,8 +5,10 @@ has_jump_shot / has_layup_dunk / has_ball_in_basket), 87/89 (jump-shot class +
 draw_made_and_miss_on_court).
 
 Shot location = the shooter's bottom-center projected onto the court.
-When SAM2 tracking is available (`tracked`), the shooter/offense team is read
-from the player's track (majority team), otherwise it falls back to per-crop.
+When `tracked` is passed, the shooter/offense team is read from the player's
+SAM2 track (majority team), otherwise it falls back to per-crop. collect_shots.py
+and run.py both use per-crop (no `tracked`) so their shots match; run.py uses
+SAM2 only to identify the shooter (track -> jersey number).
 Timings are built from the *analysis* fps so the windows stay in seconds.
 """
 from __future__ import annotations
@@ -131,6 +133,125 @@ def dedup_clip_shots(shots: list[dict], window_frames: int, dist_ft: float):
     return kept, dropped
 
 
+# ---------------------------------------------------------------------------
+# Segment / video close-out, shared by collect_shots.py and run.py so both give
+# the same shots. A segment is one possession (a clip, or the frames between
+# two hard cuts).
+
+SHOT_ROW_FIELDS = ["video", "segment", "frame", "segment_frame", "shot_type", "result", "team",
+                   "shooter_team", "number", "offense_team", "attacking_basket", "court_x", "court_y",
+                   "distance_ft", "player_id"]
+
+
+def close_segment_shots(shots: "ShotBrick", analysis_fps: float, dedup_window_s: float,
+                        dedup_dist_ft: float, label: str, team_name) -> tuple[list[dict], list[dict]]:
+    """End of one segment: offense rule (team = possession majority), then dedup.
+
+    `team_name(team_id) -> str`. Returns (kept, dropped) shot dicts.
+    """
+    clip_team = shots.apply_clip_offense()
+    print(f"  {label}: offense (possession majority) = "
+          f"{team_name(clip_team) if clip_team is not None else '?'} "
+          f"votes={ {team_name(t): n for t, n in shots.possession_votes.items()} }")
+
+    # De-duplicate: drop only near-simultaneous events (same shot detected twice).
+    window_frames = max(1, int(round(analysis_fps * dedup_window_s)))
+    kept, dropped = dedup_clip_shots(shots.shots, window_frames, dedup_dist_ft)
+    for shot in dropped:
+        print(f"  [DEDUP-DROP] {label} f{shot['frame']} {shot['outcome']} "
+              f"{shot['type']} loc=({shot.get('court_x')},{shot.get('court_y')}) "
+              f"team={shot.get('team')} offense={shot.get('offense_team')}")
+    return kept, dropped
+
+
+def shot_row(video_name: str, segment: int, segment_start: int, shot: dict, team_name,
+             number: Optional[str] = None, player_id: str = "") -> dict:
+    """One output row (SHOT_ROW_FIELDS, minus shooter_team: set by apply_video_team_rule)."""
+    team_id = shot.get("team")
+    offense_id = shot.get("offense_team")
+    cx, cy = shot.get("court_x"), shot.get("court_y")
+    distance = shot_distance(shot)
+    return {
+        "video": video_name,
+        "segment": segment,
+        "frame": shot["frame"],
+        "segment_frame": shot["frame"] - segment_start,
+        "shot_type": shot.get("type", ""),
+        "result": shot.get("outcome", ""),
+        "team": team_name(team_id) if team_id is not None else "",
+        "number": number or "",
+        "offense_team": team_name(offense_id) if offense_id is not None else "",
+        "attacking_basket": shot.get("attacking_basket") or "",
+        "court_x": "" if cx is None else round(cx, 2),
+        "court_y": "" if cy is None else round(cy, 2),
+        "distance_ft": "" if distance is None else round(distance, 2),
+        "player_id": player_id,
+    }
+
+
+def player_label(number: Optional[str], name: Optional[str]) -> str:
+    if number and name:
+        return f"{number} {name}"
+    return str(number) if number else ""
+
+
+def apply_video_team_rule(video_rows: list[dict], shots_cfg: dict, video_name: str) -> None:
+    """After all segments of a video: team = team attacking the shot's basket,
+    learned over the whole video (shots.team_by_basket_side)."""
+    for r in video_rows:
+        r.setdefault("shooter_team", r["team"])
+    if not shots_cfg.get("team_by_basket_side", False):
+        return
+    mapping, votes, reason = basket_side_mapping(
+        video_rows, min_share=float(shots_cfg.get("basket_side_min_share", 0.6)),
+        min_shots=int(shots_cfg.get("basket_side_min_shots", 3)))
+    summary = {side: dict(c) for side, c in votes.items()}
+    if mapping:
+        changed = apply_basket_side_teams(video_rows, mapping)
+        print(f"  {video_name}: team by basket side {mapping} (votes {summary}), "
+              f"{changed} shot team(s) changed")
+    else:
+        print(f"  [WARN] {video_name}: basket-side teams not applied ({reason}; "
+              f"votes {summary}); keeping per-shot teams")
+
+
+def draw_rows_shot_map(rows: list[dict], court_config, team_colors: dict) -> np.ndarray:
+    """Full court with made (o) / missed (x) per offense team, plus the shooter's
+    number/name next to each shot when known. `team_colors`: {team name: hex}."""
+    import cv2
+
+    court = draw_court(config=court_config)
+    for name, hex_color in team_colors.items():
+        made = [[float(r["court_x"]), float(r["court_y"])] for r in rows
+                if r["offense_team"] == name and r["result"] == "made" and r["court_x"] != ""]
+        missed = [[float(r["court_x"]), float(r["court_y"])] for r in rows
+                  if r["offense_team"] == name and r["result"] == "missed" and r["court_x"] != ""]
+        if not made and not missed:
+            continue
+        court = draw_made_and_miss_on_court(
+            config=court_config,
+            made_xy=np.array(made, dtype=np.float32) if made else None,
+            miss_xy=np.array(missed, dtype=np.float32) if missed else None,
+            made_color=sv.Color.from_hex(hex_color),
+            miss_color=sv.Color.from_hex(hex_color),
+            made_size=18,
+            miss_size=18,
+            line_thickness=4,
+            court=court,
+        )
+
+    scale, padding = 20, 50
+    for r in rows:
+        if r["court_x"] == "" or not (r["number"] or r["player_id"]):
+            continue
+        px = int(round(float(r["court_x"]) * scale + padding))
+        py = int(round(float(r["court_y"]) * scale + padding))
+        text = str(r["number"] or r["player_id"])
+        cv2.putText(court, text, (px + 6, py - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(court, text, (px + 6, py - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    return court
+
+
 class ShotBrick:
     def __init__(self, cfg: dict, analysis_fps: float) -> None:
         scfg = cfg["shots"]
@@ -179,6 +300,11 @@ class ShotBrick:
 
         self.shots: list[dict] = []
         self._pending: Optional[dict] = None
+
+    @property
+    def pending(self) -> Optional[dict]:
+        """The shot in progress (started, not yet decided), if any."""
+        return self._pending
 
     # ------------------------------------------------------------------- main
     def update(

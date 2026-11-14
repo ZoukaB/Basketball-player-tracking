@@ -193,6 +193,17 @@ class OCRBrick:
                 best, best_ratio = number, ratio
         return best if best_ratio >= min_ratio else None
 
+    def number_for_shot(self, shot: dict, numbers_by_frame: dict[int, list]) -> Optional[str]:
+        """Single-frame read: the number inside the shooter box on the shot's start
+        frame (or its decision frame). `numbers_by_frame`: {index: read_number_boxes()}."""
+        start_index = shot.get("start_frame", shot.get("frame"))
+        reads = numbers_by_frame.get(start_index) or numbers_by_frame.get(shot.get("frame"))
+        return self.match_number(shot.get("shooter_box"), reads) if reads else None
+
+    def validated_by_track(self) -> dict[int, str]:
+        """{tracker_id: validated number} accumulated by `update()` on SAM2 tracks."""
+        return {int(k): str(v) for k, v in self.validated_numbers.items()}
+
     def resolve_name(self, team_id: Optional[int], number: Optional[str]) -> Optional[str]:
         if team_id is None or number is None:
             return None
